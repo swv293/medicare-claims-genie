@@ -297,8 +297,12 @@ ss["instructions"] = {
 }
 
 # Try join_specs and benchmarks in instructions
-ss["instructions"]["join_specs"] = join_specs
-# Note: benchmarks are managed via the Genie UI, not the serialized_space export API
+# Note: join_specs.sql field has a proto parsing issue on this workspace version.
+# Joins are documented in text_instructions instead and can be added via the Genie UI.
+# ss["instructions"]["join_specs"] = join_specs
+
+# Add benchmarks at top level
+ss["benchmarks"] = benchmarks
 
 print("Updating space...")
 ok, result = update_space(ss)
@@ -316,7 +320,6 @@ if ok:
     print(f"  sql_snippets.filters: {len(snips.get('filters', []))}")
     print(f"  sql_snippets.expressions: {len(snips.get('expressions', []))}")
     print(f"  sql_snippets.measures: {len(snips.get('measures', []))}")
-    print(f"  join_specs: {len(ss2.get('join_specs', []))}")
     bm = ss2.get("benchmarks", {})
     print(f"  benchmarks.questions: {len(bm.get('questions', []))}")
 else:
