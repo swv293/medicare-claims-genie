@@ -680,34 +680,68 @@ for t in tables:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 8: Sample Queries
+# MAGIC ## Step 8: Benchmark Queries
 # MAGIC
-# MAGIC These queries demonstrate the key analytics this data warehouse supports.
+# MAGIC These 5 benchmark queries are also registered in the Genie space as `example_question_sqls`.
+# MAGIC They serve as reference SQL for Genie to learn from and as test cases for evaluating accuracy.
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC -- Enrollment by county (top 10)
-# MAGIC SELECT c.county_name, c.state_code, COUNT(DISTINCT e.member_id) as enrolled_members
+# MAGIC -- Benchmark 1: Enrollment by county
+# MAGIC -- Question: "What are our Medicaid enrollment numbers by county?"
+# MAGIC SELECT c.county_name, c.state_code,
+# MAGIC   COUNT(DISTINCT e.member_id) as enrolled_members,
+# MAGIC   SUM(CASE WHEN e.is_active THEN 1 ELSE 0 END) as active_member_months
 # MAGIC FROM ${CATALOG}.${SCHEMA}.fact_enrollment e
 # MAGIC JOIN ${CATALOG}.${SCHEMA}.dim_county c ON e.county_fips = c.county_fips
-# MAGIC WHERE e.is_active = TRUE
 # MAGIC GROUP BY 1, 2
 # MAGIC ORDER BY 3 DESC
-# MAGIC LIMIT 10
+# MAGIC LIMIT 15
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC -- Quality performance by measure and year (Metric View)
-# MAGIC SELECT
-# MAGIC   measure_name,
-# MAGIC   measure_category,
-# MAGIC   measurement_year,
+# MAGIC -- Benchmark 2: Quality metrics for current quarter (Metric View)
+# MAGIC -- Question: "Show me clinical quality metrics for the current quarter"
+# MAGIC SELECT measure_name, measure_category, reporting_direction, regulatory_threshold,
 # MAGIC   MEASURE(denominator) as denominator,
 # MAGIC   MEASURE(numerator) as numerator,
 # MAGIC   MEASURE(performance_rate) as performance_rate,
-# MAGIC   MEASURE(gap_to_threshold) as gap_to_threshold,
+# MAGIC   MEASURE(gap_to_threshold) as gap_to_threshold
+# MAGIC FROM ${CATALOG}.${SCHEMA}.mv_quality_performance
+# MAGIC WHERE measurement_year = 2025 AND quarter = 1
+# MAGIC GROUP BY measure_name, measure_category, reporting_direction, regulatory_threshold
+# MAGIC ORDER BY measure_name
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Benchmark 3: At-risk measures not meeting thresholds
+# MAGIC -- Question: "Which measures are at risk of not meeting regulatory thresholds?"
+# MAGIC SELECT * FROM (
+# MAGIC   SELECT measure_name, measure_category, measurement_year, reporting_direction,
+# MAGIC     regulatory_threshold,
+# MAGIC     MEASURE(performance_rate) as performance_rate,
+# MAGIC     MEASURE(gap_to_threshold) as gap_to_threshold,
+# MAGIC     MEASURE(denominator) as denominator
+# MAGIC   FROM ${CATALOG}.${SCHEMA}.mv_quality_performance
+# MAGIC   WHERE measurement_year = 2025
+# MAGIC   GROUP BY measure_name, measure_category, measurement_year, reporting_direction, regulatory_threshold
+# MAGIC )
+# MAGIC WHERE (reporting_direction = 'Higher is Better' AND performance_rate < regulatory_threshold)
+# MAGIC    OR (reporting_direction = 'Lower is Better' AND performance_rate > regulatory_threshold)
+# MAGIC ORDER BY ABS(gap_to_threshold) DESC
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Benchmark 4: Year-over-year comparison by measure (Metric View)
+# MAGIC -- Question: "Compare this year's performance vs last year by quality measure"
+# MAGIC SELECT measure_name, measure_category, measurement_year,
+# MAGIC   MEASURE(performance_rate) as performance_rate,
+# MAGIC   MEASURE(denominator) as denominator,
+# MAGIC   MEASURE(numerator) as numerator,
 # MAGIC   MEASURE(distinct_members) as distinct_members
 # MAGIC FROM ${CATALOG}.${SCHEMA}.mv_quality_performance
 # MAGIC GROUP BY measure_name, measure_category, measurement_year
@@ -716,32 +750,17 @@ for t in tables:
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC -- Performance by county and measure (Metric View)
-# MAGIC SELECT
-# MAGIC   county_name,
-# MAGIC   state_code,
-# MAGIC   measure_name,
-# MAGIC   MEASURE(performance_rate) as performance_rate,
-# MAGIC   MEASURE(denominator) as denominator
-# MAGIC FROM ${CATALOG}.${SCHEMA}.mv_quality_performance
-# MAGIC WHERE measurement_year = 2025
-# MAGIC GROUP BY county_name, state_code, measure_name
-# MAGIC ORDER BY county_name, measure_name
-# MAGIC LIMIT 20
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC -- Performance by aid category and race/ethnicity (health equity analysis)
-# MAGIC SELECT
-# MAGIC   aid_category,
-# MAGIC   race_ethnicity,
-# MAGIC   MEASURE(performance_rate) as performance_rate,
-# MAGIC   MEASURE(distinct_members) as members
-# MAGIC FROM ${CATALOG}.${SCHEMA}.mv_quality_performance
-# MAGIC WHERE measurement_year = 2025
-# MAGIC GROUP BY aid_category, race_ethnicity
-# MAGIC ORDER BY aid_category, race_ethnicity
+# MAGIC -- Benchmark 5: Claims cost by type and aid category
+# MAGIC -- Question: "Show claims cost breakdown by claim type and aid category"
+# MAGIC SELECT cl.claim_type, m.aid_category,
+# MAGIC   COUNT(*) as claim_count,
+# MAGIC   ROUND(SUM(cl.paid_amount), 2) as total_paid,
+# MAGIC   ROUND(AVG(cl.paid_amount), 2) as avg_paid,
+# MAGIC   COUNT(DISTINCT cl.member_id) as unique_members
+# MAGIC FROM ${CATALOG}.${SCHEMA}.fact_claims cl
+# MAGIC JOIN ${CATALOG}.${SCHEMA}.dim_member m ON cl.member_id = m.member_id
+# MAGIC GROUP BY 1, 2
+# MAGIC ORDER BY 4 DESC
 
 # COMMAND ----------
 

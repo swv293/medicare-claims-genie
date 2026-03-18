@@ -73,7 +73,19 @@ python execute_sql.py create_metric_view.sql
 | `execute_sql.py` | SQL execution utility |
 | `create_genie_space.py` | Genie space creation script |
 
-## Example Questions (Genie Space)
+## Benchmark Queries (Genie Space)
+
+The Genie space includes 5 benchmark queries registered as `example_question_sqls`. These serve as reference SQL for Genie to learn from and as test cases for evaluating response accuracy.
+
+| # | Question | Tables/Views Used |
+|---|----------|-------------------|
+| 1 | "What are our Medicaid enrollment numbers by county?" | `fact_enrollment` JOIN `dim_county` |
+| 2 | "Show me clinical quality metrics for the current quarter" | `mv_quality_performance` (metric view) |
+| 3 | "Which measures are at risk of not meeting regulatory thresholds?" | `mv_quality_performance` (metric view) |
+| 4 | "Compare this year's performance vs last year by quality measure" | `mv_quality_performance` (metric view) |
+| 5 | "Show claims cost breakdown by claim type and aid category" | `fact_claims` JOIN `dim_member` |
+
+## Sample Questions (Genie Space)
 
 - "What are our Medicaid enrollment numbers by county?"
 - "Show me clinical quality metrics for the current quarter"
@@ -81,3 +93,5 @@ python execute_sql.py create_metric_view.sql
 - "Compare this year's performance vs last year by quality measure"
 - "How are we performing on all diabetes-related quality measures?"
 - "Show behavioral health follow-up rates by quarter"
+- "Which providers have the highest quality measure compliance rates?"
+- "Show enrollment trends by aid category over time"

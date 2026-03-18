@@ -106,6 +106,33 @@ serialized_space = {
                     "IMPORTANT: mv_quality_performance is a METRIC VIEW. Always wrap measures in MEASURE() function. Do NOT use SELECT *. Always specify dimensions in GROUP BY.\n"
                 ]
             }
+        ],
+        "example_question_sqls": [
+            {
+                "id": "c0000000000000000000000000000001",
+                "question": ["What are our Medicaid enrollment numbers by county?"],
+                "sql": ["SELECT c.county_name, c.state_code, COUNT(DISTINCT e.member_id) as enrolled_members, SUM(CASE WHEN e.is_active THEN 1 ELSE 0 END) as active_member_months FROM serverless_stable_swv01_catalog.medicaid_clinical.fact_enrollment e JOIN serverless_stable_swv01_catalog.medicaid_clinical.dim_county c ON e.county_fips = c.county_fips GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 15"]
+            },
+            {
+                "id": "c0000000000000000000000000000002",
+                "question": ["Show me clinical quality metrics for the current quarter"],
+                "sql": ["SELECT measure_name, measure_category, reporting_direction, regulatory_threshold, MEASURE(denominator) as denominator, MEASURE(numerator) as numerator, MEASURE(performance_rate) as performance_rate, MEASURE(gap_to_threshold) as gap_to_threshold FROM serverless_stable_swv01_catalog.medicaid_clinical.mv_quality_performance WHERE measurement_year = 2025 AND quarter = 1 GROUP BY measure_name, measure_category, reporting_direction, regulatory_threshold ORDER BY measure_name"]
+            },
+            {
+                "id": "c0000000000000000000000000000003",
+                "question": ["Which measures are at risk of not meeting regulatory thresholds?"],
+                "sql": ["SELECT * FROM (SELECT measure_name, measure_category, measurement_year, reporting_direction, regulatory_threshold, MEASURE(performance_rate) as performance_rate, MEASURE(gap_to_threshold) as gap_to_threshold, MEASURE(denominator) as denominator FROM serverless_stable_swv01_catalog.medicaid_clinical.mv_quality_performance WHERE measurement_year = 2025 GROUP BY measure_name, measure_category, measurement_year, reporting_direction, regulatory_threshold) WHERE (reporting_direction = 'Higher is Better' AND performance_rate < regulatory_threshold) OR (reporting_direction = 'Lower is Better' AND performance_rate > regulatory_threshold) ORDER BY ABS(gap_to_threshold) DESC"]
+            },
+            {
+                "id": "c0000000000000000000000000000004",
+                "question": ["Compare this year performance vs last year by quality measure"],
+                "sql": ["SELECT measure_name, measure_category, measurement_year, MEASURE(performance_rate) as performance_rate, MEASURE(denominator) as denominator, MEASURE(numerator) as numerator, MEASURE(distinct_members) as distinct_members FROM serverless_stable_swv01_catalog.medicaid_clinical.mv_quality_performance GROUP BY measure_name, measure_category, measurement_year ORDER BY measure_name, measurement_year"]
+            },
+            {
+                "id": "c0000000000000000000000000000005",
+                "question": ["Show claims cost breakdown by claim type and aid category"],
+                "sql": ["SELECT cl.claim_type, m.aid_category, COUNT(*) as claim_count, ROUND(SUM(cl.paid_amount), 2) as total_paid, ROUND(AVG(cl.paid_amount), 2) as avg_paid, COUNT(DISTINCT cl.member_id) as unique_members FROM serverless_stable_swv01_catalog.medicaid_clinical.fact_claims cl JOIN serverless_stable_swv01_catalog.medicaid_clinical.dim_member m ON cl.member_id = m.member_id GROUP BY 1, 2 ORDER BY 4 DESC"]
+            }
         ]
     }
 }
