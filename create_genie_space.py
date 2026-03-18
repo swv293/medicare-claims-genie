@@ -88,25 +88,123 @@ serialized_space = {
                     "FACTS: fact_quality_events (10000 rows) - member x measure x year with in_denominator/in_numerator/exclusion_applied flags; fact_enrollment (3000 rows) - monthly snapshots; fact_claims (10000 rows) - claims with ICD-10 dx_codes and CPT proc_codes.\n",
                     "METRIC VIEW: mv_quality_performance - joins fact_quality_events with dim_measure, dim_county, dim_provider, dim_member. Query with MEASURE() function. Measures: denominator, numerator, performance_rate, gap_to_threshold, total_events, exclusion_count, distinct_members, distinct_providers. Dimensions: measure_name, measure_category, measurement_year, quarter, county_name, state_code, region, provider_type, aid_category, gender, race_ethnicity, and more.\n\n",
 
-                    "=== JOINS ===\n",
-                    "fact_quality_events.member_id->dim_member.member_id; fact_quality_events.measure_id->dim_measure.measure_id; fact_quality_events.provider_npi->dim_provider.provider_npi; fact_quality_events.county_fips->dim_county.county_fips; fact_enrollment.member_id->dim_member.member_id; fact_enrollment.county_fips->dim_county.county_fips; fact_claims.member_id->dim_member.member_id; fact_claims.provider_npi->dim_provider.provider_npi; dim_member.county_fips->dim_county.county_fips. Use mv_quality_performance metric view for quality measure analytics - it pre-joins all tables.\n\n",
+                    "=== JOIN RELATIONSHIPS ===\n",
+                    "fact_quality_events.member_id = dim_member.member_id (quality events to member demographics)\n",
+                    "fact_quality_events.measure_id = dim_measure.measure_id (quality events to measure definitions)\n",
+                    "fact_quality_events.provider_npi = dim_provider.provider_npi (quality events to provider)\n",
+                    "fact_quality_events.county_fips = dim_county.county_fips (quality events to county)\n",
+                    "fact_enrollment.member_id = dim_member.member_id (enrollment to member demographics)\n",
+                    "fact_enrollment.county_fips = dim_county.county_fips (enrollment to county)\n",
+                    "fact_claims.member_id = dim_member.member_id (claims to member demographics)\n",
+                    "fact_claims.provider_npi = dim_provider.provider_npi (claims to provider)\n",
+                    "dim_member.county_fips = dim_county.county_fips (member residence to county)\n",
+                    "dim_provider.county_fips = dim_county.county_fips (provider location to county)\n",
+                    "Use mv_quality_performance metric view for quality analytics - it pre-joins all tables.\n\n",
 
                     "=== JARGON ===\n",
-                    "HEDIS: Healthcare Effectiveness Data and Information Set (NCQA quality measures). CMS Core Set: CMS-required Medicaid/CHIP measures. MY: Measurement Year. Performance Rate: (Numerator/Denominator)*100. Regulatory Threshold: min rate required by state contract. At Risk: rate below threshold.\n",
+                    "HEDIS: Healthcare Effectiveness Data and Information Set. CMS Core Set: CMS-required Medicaid/CHIP measures. MY: Measurement Year. Performance Rate: (Numerator/Denominator)*100. Regulatory Threshold: min rate required by state contract. At Risk: rate below threshold.\n",
                     "Aid Categories: TANF (low-income families), SSI (aged/blind/disabled), CHIP (children), Expansion Adult (ACA expansion 19-64). Claim Types: IP (inpatient), OP (outpatient), Prof (professional), Rx (pharmacy). Provider Types: PCP, FQHC (community health center), BH (behavioral health). SMI: Serious Mental Illness. MCO: Managed Care Organization. FFS: Fee-For-Service. SUD: Substance Use Disorder. PMPM: Per Member Per Month.\n\n",
 
                     "=== CALCULATION RULES ===\n",
-                    "Performance Rate = COUNT(in_numerator AND NOT exclusion_applied) * 100.0 / NULLIF(COUNT(in_denominator AND NOT exclusion_applied), 0). For 'Lower is Better' measures (CDC-HbA1c, PCR), lower rate = better. For all others, higher rate = better.\n\n",
-
-                    "=== EXAMPLE QUERIES ===\n",
-                    "Enrollment by county: SELECT c.county_name, c.state_code, COUNT(DISTINCT e.member_id) FROM fact_enrollment e JOIN dim_county c USING(county_fips) WHERE e.is_active GROUP BY 1,2 ORDER BY 3 DESC;\n",
-                    "Quality metrics by measure and year (METRIC VIEW): SELECT measure_name, measure_category, measurement_year, MEASURE(performance_rate) as rate, MEASURE(denominator) as denom, MEASURE(numerator) as numer, MEASURE(gap_to_threshold) as gap FROM mv_quality_performance GROUP BY measure_name, measure_category, measurement_year ORDER BY measure_name;\n",
-                    "At-risk measures: SELECT measure_name, measure_category, measurement_year, regulatory_threshold, MEASURE(performance_rate) as rate, MEASURE(gap_to_threshold) as gap FROM mv_quality_performance WHERE MEASURE(gap_to_threshold) > 0 GROUP BY ALL;\n",
-                    "Performance by county: SELECT county_name, state_code, measure_name, MEASURE(performance_rate) as rate FROM mv_quality_performance GROUP BY county_name, state_code, measure_name;\n",
+                    "Performance Rate = COUNT(in_numerator AND NOT exclusion_applied) * 100.0 / NULLIF(COUNT(in_denominator AND NOT exclusion_applied), 0). For Lower is Better measures (CDC-HbA1c, PCR), lower rate = better.\n",
                     "IMPORTANT: mv_quality_performance is a METRIC VIEW. Always wrap measures in MEASURE() function. Do NOT use SELECT *. Always specify dimensions in GROUP BY.\n"
                 ]
             }
         ],
+        "sql_snippets": {
+            "filters": [
+                {
+                    "id": "f0000000000000000000000000000001",
+                    "sql": ["fact_enrollment.is_active = TRUE"],
+                    "display_name": "active members only",
+                    "synonyms": ["currently enrolled", "active enrollment"],
+                    "comment": ["Filters to only actively enrolled members"],
+                    "instruction": ["Use when counting current enrollment or active members"]
+                },
+                {
+                    "id": "f0000000000000000000000000000002",
+                    "sql": ["fact_quality_events.in_denominator = TRUE AND fact_quality_events.exclusion_applied = FALSE"],
+                    "display_name": "eligible for measure",
+                    "synonyms": ["in denominator", "eligible population"],
+                    "comment": ["Filters to members eligible for a quality measure excluding valid exclusions"],
+                    "instruction": ["Use as base filter when calculating quality measure rates"]
+                },
+                {
+                    "id": "f0000000000000000000000000000003",
+                    "sql": ["dim_measure.high_priority_flag = TRUE"],
+                    "display_name": "high priority measures",
+                    "synonyms": ["CMS priority", "key measures", "critical measures"],
+                    "comment": ["Filters to CMS-designated high-priority quality measures"],
+                    "instruction": ["Use when focusing on the most important regulatory measures"]
+                },
+                {
+                    "id": "f0000000000000000000000000000004",
+                    "sql": ["dim_measure.star_rating_flag = TRUE"],
+                    "display_name": "star rating measures",
+                    "synonyms": ["star measures", "plan rating measures"],
+                    "comment": ["Filters to measures included in health plan star ratings"],
+                    "instruction": ["Use when analyzing measures impacting plan star ratings"]
+                }
+            ],
+            "expressions": [
+                {
+                    "id": "f0000000000000000000000000000005",
+                    "alias": "measurement_quarter",
+                    "sql": ["CONCAT(fact_quality_events.measurement_year, '-Q', fact_quality_events.quarter)"],
+                    "display_name": "measurement quarter",
+                    "synonyms": ["quarter", "reporting quarter"],
+                    "comment": ["Formats measurement year and quarter as YYYY-QN"],
+                    "instruction": ["Use for quarter-level trend analysis labels"]
+                },
+                {
+                    "id": "f0000000000000000000000000000006",
+                    "alias": "member_age",
+                    "sql": ["FLOOR(DATEDIFF(CURRENT_DATE(), dim_member.date_of_birth) / 365.25)"],
+                    "display_name": "member age",
+                    "synonyms": ["age", "patient age", "enrollee age"],
+                    "comment": ["Calculates current age in years from date of birth"],
+                    "instruction": ["Use when analyzing by age group or checking age-based eligibility"]
+                },
+                {
+                    "id": "f0000000000000000000000000000007",
+                    "alias": "enrollment_month_label",
+                    "sql": ["DATE_FORMAT(fact_enrollment.snapshot_month, 'yyyy-MM')"],
+                    "display_name": "enrollment month",
+                    "synonyms": ["month", "snapshot month"],
+                    "comment": ["Formats enrollment snapshot month as YYYY-MM"],
+                    "instruction": ["Use for monthly enrollment trend labels"]
+                }
+            ],
+            "measures": [
+                {
+                    "id": "f0000000000000000000000000000008",
+                    "alias": "performance_rate",
+                    "sql": ["ROUND(COUNT(CASE WHEN fact_quality_events.in_numerator AND NOT fact_quality_events.exclusion_applied THEN 1 END) * 100.0 / NULLIF(COUNT(CASE WHEN fact_quality_events.in_denominator AND NOT fact_quality_events.exclusion_applied THEN 1 END), 0), 2)"],
+                    "display_name": "performance rate",
+                    "synonyms": ["compliance rate", "quality rate", "HEDIS rate"],
+                    "comment": ["Quality measure performance rate: (numerator/denominator)*100"],
+                    "instruction": ["Use for quality measure compliance. For Lower is Better measures (CDC-HbA1c, PCR), lower rate is better."]
+                },
+                {
+                    "id": "f0000000000000000000000000000009",
+                    "alias": "total_paid",
+                    "sql": ["ROUND(SUM(fact_claims.paid_amount), 2)"],
+                    "display_name": "total paid amount",
+                    "synonyms": ["total cost", "total spend", "paid claims"],
+                    "comment": ["Sum of all claim paid amounts in USD"],
+                    "instruction": ["Use for claims cost analysis and financial reporting"]
+                },
+                {
+                    "id": "f000000000000000000000000000000a",
+                    "alias": "pmpm_cost",
+                    "sql": ["ROUND(SUM(fact_claims.paid_amount) / NULLIF(COUNT(DISTINCT fact_claims.member_id), 0), 2)"],
+                    "display_name": "per member cost",
+                    "synonyms": ["PMPM", "per member per month", "average cost per member"],
+                    "comment": ["Average paid amount per unique member"],
+                    "instruction": ["Use for per-member cost analysis and PMPM calculations"]
+                }
+            ]
+        },
         "example_question_sqls": [
             {
                 "id": "c0000000000000000000000000000001",
