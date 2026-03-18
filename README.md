@@ -15,7 +15,7 @@ Star schema design with a central fact table (`fact_quality_events`) surrounded 
 | `fact_quality_events` | Fact | 10,000 | Member x measure x year events |
 | `fact_enrollment` | Fact | 3,000 | Monthly enrollment snapshots |
 | `fact_claims` | Fact | 10,000 | Claims with ICD-10/CPT codes |
-| `v_yoy_quality_performance` | View | ~6,000 | Precomputed YoY comparison |
+| `mv_quality_performance` | Metric View | - | Flexible quality measure analytics with MEASURE() functions |
 
 ## Quality Measures (18 Seeded)
 
@@ -57,8 +57,8 @@ python execute_sql.py insert_data.sql
 # Apply tags
 python execute_sql.py apply_tags.sql
 
-# Create YoY view
-python execute_sql.py create_view.sql
+# Create metric view
+python execute_sql.py create_metric_view.sql
 ```
 
 ## Files
@@ -68,7 +68,7 @@ python execute_sql.py create_view.sql
 | `notebooks/medicaid_clinical_setup.py` | Self-contained Databricks notebook |
 | `create_tables.sql` | DDL with descriptions |
 | `apply_tags.sql` | PHI/PII tag statements |
-| `create_view.sql` | YoY comparison view |
+| `create_metric_view.sql` | Metric view with MEASURE() functions |
 | `generate_data.py` | Synthetic data generator |
 | `execute_sql.py` | SQL execution utility |
 | `create_genie_space.py` | Genie space creation script |

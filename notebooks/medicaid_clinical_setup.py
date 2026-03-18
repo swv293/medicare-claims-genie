@@ -4,7 +4,7 @@
 # MAGIC
 # MAGIC This notebook creates a complete Medicaid clinical data warehouse with:
 # MAGIC - **7 Delta tables** (4 dimensions + 3 fact tables) with realistic synthetic data
-# MAGIC - **1 YoY comparison view** for quality measure performance tracking
+# MAGIC - **1 Metric View** for flexible quality measure performance analytics with MEASURE() functions
 # MAGIC - **Table and column descriptions** for data catalog discoverability
 # MAGIC - **PHI/PII tags** for governance and access control policies
 # MAGIC - **A Genie Space** for natural language querying
@@ -18,7 +18,7 @@
 # MAGIC - `fact_quality_events` (10000 rows) — Member × measure × year events
 # MAGIC - `fact_enrollment` (3000 rows) — Monthly enrollment snapshots
 # MAGIC - `fact_claims` (10000 rows) — Claims with diagnosis/procedure codes
-# MAGIC - `v_yoy_quality_performance` — YoY comparison view
+# MAGIC - `mv_quality_performance` — Metric view with MEASURE() functions for flexible aggregation
 
 # COMMAND ----------
 
@@ -516,60 +516,154 @@ for stmt in tag_statements:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 6: Create Year-over-Year Comparison View
+# MAGIC ## Step 6: Create Quality Performance Metric View
+# MAGIC
+# MAGIC This creates a **Databricks Metric View** (not a standard view) that joins fact_quality_events
+# MAGIC with all dimension tables. Metric views separate measure definitions from dimension groupings,
+# MAGIC allowing flexible aggregation at query time using the `MEASURE()` function.
+# MAGIC
+# MAGIC **Requires:** Databricks Runtime 17.2+ or serverless SQL warehouse.
 
 # COMMAND ----------
 
 spark.sql(f"""
-CREATE OR REPLACE VIEW {CATALOG}.{SCHEMA}.v_yoy_quality_performance
-COMMENT 'Year-over-year quality measure performance comparison. Precomputed rates with threshold status and trend direction.'
-AS
-WITH annual_perf AS (
-    SELECT
-        qe.measure_id,
-        qe.measurement_year,
-        qe.county_fips,
-        dm.measure_name,
-        dm.measure_category,
-        dm.reporting_direction,
-        dm.regulatory_threshold,
-        COUNT(CASE WHEN qe.in_denominator AND NOT qe.exclusion_applied THEN 1 END) AS denominator,
-        COUNT(CASE WHEN qe.in_numerator AND NOT qe.exclusion_applied THEN 1 END) AS numerator,
-        ROUND(
-          COUNT(CASE WHEN qe.in_numerator AND NOT qe.exclusion_applied THEN 1 END) * 100.0
-          / NULLIF(COUNT(CASE WHEN qe.in_denominator AND NOT qe.exclusion_applied THEN 1 END), 0), 2
-        ) AS performance_rate
-    FROM {CATALOG}.{SCHEMA}.fact_quality_events qe
-    JOIN {CATALOG}.{SCHEMA}.dim_measure dm USING (measure_id)
-    GROUP BY 1,2,3,4,5,6,7
-)
-SELECT
-    cy.measure_id, cy.measure_name, cy.measure_category, cy.reporting_direction,
-    cy.regulatory_threshold, cy.county_fips,
-    py.measurement_year AS prior_year, cy.measurement_year AS current_year,
-    py.denominator AS prior_denom, cy.denominator AS current_denom,
-    py.performance_rate AS prior_year_rate, cy.performance_rate AS current_year_rate,
-    ROUND(cy.performance_rate - COALESCE(py.performance_rate, 0), 2) AS rate_delta,
-    CASE
-        WHEN cy.reporting_direction = 'Higher is Better' AND cy.performance_rate >= cy.regulatory_threshold THEN 'Met'
-        WHEN cy.reporting_direction = 'Lower is Better' AND cy.performance_rate <= cy.regulatory_threshold THEN 'Met'
-        ELSE 'At Risk'
-    END AS threshold_status,
-    CASE
-        WHEN py.performance_rate IS NULL THEN 'New'
-        WHEN cy.reporting_direction = 'Higher is Better' AND cy.performance_rate > py.performance_rate THEN 'Improved'
-        WHEN cy.reporting_direction = 'Higher is Better' AND cy.performance_rate < py.performance_rate THEN 'Declined'
-        WHEN cy.reporting_direction = 'Lower is Better' AND cy.performance_rate < py.performance_rate THEN 'Improved'
-        WHEN cy.reporting_direction = 'Lower is Better' AND cy.performance_rate > py.performance_rate THEN 'Declined'
-        ELSE 'Stable'
-    END AS trend_direction
-FROM annual_perf cy
-LEFT JOIN annual_perf py
-    ON cy.measure_id = py.measure_id
-   AND cy.county_fips = py.county_fips
-   AND py.measurement_year = cy.measurement_year - 1
+CREATE OR REPLACE VIEW {CATALOG}.{SCHEMA}.mv_quality_performance
+WITH METRICS
+LANGUAGE YAML
+AS $$
+version: 1.1
+comment: >
+  Medicaid clinical quality measure performance metric view.
+  Computes numerator, denominator, and performance rates across HEDIS and CMS Core Set measures.
+  Dimensions include measure, county, year, quarter, provider, and member demographics.
+  Use MEASURE() aggregate function when querying measures.
+
+source: {CATALOG}.{SCHEMA}.fact_quality_events
+
+joins:
+  - name: dim_measure
+    source: {CATALOG}.{SCHEMA}.dim_measure
+    "on": source.measure_id = dim_measure.measure_id
+
+  - name: dim_county
+    source: {CATALOG}.{SCHEMA}.dim_county
+    "on": source.county_fips = dim_county.county_fips
+
+  - name: dim_provider
+    source: {CATALOG}.{SCHEMA}.dim_provider
+    "on": source.provider_npi = dim_provider.provider_npi
+
+  - name: dim_member
+    source: {CATALOG}.{SCHEMA}.dim_member
+    "on": source.member_id = dim_member.member_id
+
+dimensions:
+  - name: measure_id
+    expr: source.measure_id
+    comment: "NCQA/CMS short code (e.g., CDC-HbA1c, BCS, W34)"
+  - name: measure_name
+    expr: dim_measure.measure_name
+    comment: "Full descriptive name of the quality measure"
+  - name: measure_category
+    expr: dim_measure.measure_category
+    comment: "Clinical domain: Diabetes, Cardiovascular, Preventive, Behavioral Health, etc."
+  - name: reporting_standard
+    expr: dim_measure.reporting_standard
+    comment: "HEDIS, CMS Adult Core Set, or CMS Child Core Set"
+  - name: reporting_direction
+    expr: dim_measure.reporting_direction
+    comment: "Higher is Better or Lower is Better"
+  - name: regulatory_threshold
+    expr: dim_measure.regulatory_threshold
+    comment: "Minimum performance rate required by state Medicaid contract"
+  - name: high_priority_flag
+    expr: dim_measure.high_priority_flag
+    comment: "CMS-designated high-priority measure"
+  - name: star_rating_flag
+    expr: dim_measure.star_rating_flag
+    comment: "Included in health plan star rating calculations"
+  - name: measurement_year
+    expr: source.measurement_year
+    comment: "Measurement year (e.g., 2024, 2025)"
+  - name: quarter
+    expr: source.quarter
+    comment: "Calendar quarter 1-4"
+  - name: county_fips
+    expr: source.county_fips
+    comment: "Five-digit FIPS code of member county at time of event"
+  - name: county_name
+    expr: dim_county.county_name
+    comment: "Human-readable county name"
+  - name: state_code
+    expr: dim_county.state_code
+    comment: "Two-letter US state abbreviation"
+  - name: region
+    expr: dim_county.region
+    comment: "State health region grouping"
+  - name: urban_rural_class
+    expr: dim_county.urban_rural_class
+    comment: "Metropolitan, Micropolitan, Rural, or Frontier"
+  - name: provider_npi
+    expr: source.provider_npi
+    comment: "National Provider Identifier of rendering provider"
+  - name: provider_name
+    expr: dim_provider.provider_name
+    comment: "Provider name"
+  - name: provider_type
+    expr: dim_provider.provider_type
+    comment: "PCP, Specialist, FQHC, BH, OB/GYN, Pediatrics, Urgent Care, Hospital"
+  - name: data_source
+    expr: source.data_source
+    comment: "Admin (claims), EHR, or Hybrid"
+  - name: aid_category
+    expr: dim_member.aid_category
+    comment: "TANF, SSI, CHIP, or Expansion Adult"
+  - name: gender
+    expr: dim_member.gender
+    comment: "Member gender: M, F, Other"
+  - name: race_ethnicity
+    expr: dim_member.race_ethnicity
+    comment: "OMB standard race/ethnicity categories"
+
+measures:
+  - name: denominator
+    expr: COUNT(CASE WHEN source.in_denominator AND NOT source.exclusion_applied THEN 1 END)
+    comment: "Count of eligible members in measure denominator (excluding valid exclusions)"
+  - name: numerator
+    expr: COUNT(CASE WHEN source.in_numerator AND NOT source.exclusion_applied THEN 1 END)
+    comment: "Count of members meeting compliant event criteria (excluding valid exclusions)"
+  - name: total_events
+    expr: COUNT(*)
+    comment: "Total quality event records"
+  - name: exclusion_count
+    expr: COUNT(CASE WHEN source.exclusion_applied THEN 1 END)
+    comment: "Count of events where a valid clinical exclusion was applied"
+  - name: performance_rate
+    expr: |
+      ROUND(
+        COUNT(CASE WHEN source.in_numerator AND NOT source.exclusion_applied THEN 1 END) * 100.0
+        / NULLIF(COUNT(CASE WHEN source.in_denominator AND NOT source.exclusion_applied THEN 1 END), 0),
+        2
+      )
+    comment: "Quality measure performance rate: (numerator / denominator) * 100"
+  - name: gap_to_threshold
+    expr: |
+      ROUND(
+        ANY_VALUE(dim_measure.regulatory_threshold) -
+        (COUNT(CASE WHEN source.in_numerator AND NOT source.exclusion_applied THEN 1 END) * 100.0
+         / NULLIF(COUNT(CASE WHEN source.in_denominator AND NOT source.exclusion_applied THEN 1 END), 0)),
+        2
+      )
+    comment: "Gap between performance rate and regulatory threshold. Positive = below threshold."
+  - name: distinct_members
+    expr: COUNT(DISTINCT source.member_id)
+    comment: "Count of distinct members with quality events"
+  - name: distinct_providers
+    expr: COUNT(DISTINCT source.provider_npi)
+    comment: "Count of distinct rendering providers"
+$$
 """)
-print("v_yoy_quality_performance view created successfully")
+print("mv_quality_performance metric view created successfully")
 
 # COMMAND ----------
 
@@ -578,7 +672,7 @@ print("v_yoy_quality_performance view created successfully")
 
 # COMMAND ----------
 
-tables = ['dim_county','dim_provider','dim_member','dim_measure','fact_quality_events','fact_enrollment','fact_claims','v_yoy_quality_performance']
+tables = ['dim_county','dim_provider','dim_member','dim_measure','fact_quality_events','fact_enrollment','fact_claims']
 for t in tables:
     count = spark.sql(f"SELECT COUNT(*) FROM {CATALOG}.{SCHEMA}.{t}").collect()[0][0]
     print(f"{t}: {count:,} rows")
@@ -605,21 +699,49 @@ for t in tables:
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC -- At-risk measures
-# MAGIC SELECT measure_name, measure_category, current_year_rate, regulatory_threshold, rate_delta, threshold_status
-# MAGIC FROM ${CATALOG}.${SCHEMA}.v_yoy_quality_performance
-# MAGIC WHERE threshold_status = 'At Risk' AND current_year = 2025
-# MAGIC ORDER BY ABS(rate_delta) DESC
+# MAGIC -- Quality performance by measure and year (Metric View)
+# MAGIC SELECT
+# MAGIC   measure_name,
+# MAGIC   measure_category,
+# MAGIC   measurement_year,
+# MAGIC   MEASURE(denominator) as denominator,
+# MAGIC   MEASURE(numerator) as numerator,
+# MAGIC   MEASURE(performance_rate) as performance_rate,
+# MAGIC   MEASURE(gap_to_threshold) as gap_to_threshold,
+# MAGIC   MEASURE(distinct_members) as distinct_members
+# MAGIC FROM ${CATALOG}.${SCHEMA}.mv_quality_performance
+# MAGIC GROUP BY measure_name, measure_category, measurement_year
+# MAGIC ORDER BY measure_name, measurement_year
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Performance by county and measure (Metric View)
+# MAGIC SELECT
+# MAGIC   county_name,
+# MAGIC   state_code,
+# MAGIC   measure_name,
+# MAGIC   MEASURE(performance_rate) as performance_rate,
+# MAGIC   MEASURE(denominator) as denominator
+# MAGIC FROM ${CATALOG}.${SCHEMA}.mv_quality_performance
+# MAGIC WHERE measurement_year = 2025
+# MAGIC GROUP BY county_name, state_code, measure_name
+# MAGIC ORDER BY county_name, measure_name
 # MAGIC LIMIT 20
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC -- Year-over-year comparison
-# MAGIC SELECT measure_name, measure_category, prior_year_rate, current_year_rate, rate_delta, trend_direction
-# MAGIC FROM ${CATALOG}.${SCHEMA}.v_yoy_quality_performance
-# MAGIC WHERE current_year = 2025
-# MAGIC ORDER BY ABS(rate_delta) DESC
+# MAGIC -- Performance by aid category and race/ethnicity (health equity analysis)
+# MAGIC SELECT
+# MAGIC   aid_category,
+# MAGIC   race_ethnicity,
+# MAGIC   MEASURE(performance_rate) as performance_rate,
+# MAGIC   MEASURE(distinct_members) as members
+# MAGIC FROM ${CATALOG}.${SCHEMA}.mv_quality_performance
+# MAGIC WHERE measurement_year = 2025
+# MAGIC GROUP BY aid_category, race_ethnicity
+# MAGIC ORDER BY aid_category, race_ethnicity
 
 # COMMAND ----------
 

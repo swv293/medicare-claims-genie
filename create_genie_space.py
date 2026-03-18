@@ -70,8 +70,10 @@ serialized_space = {
             {"identifier": "serverless_stable_swv01_catalog.medicaid_clinical.dim_provider"},
             {"identifier": "serverless_stable_swv01_catalog.medicaid_clinical.fact_claims"},
             {"identifier": "serverless_stable_swv01_catalog.medicaid_clinical.fact_enrollment"},
-            {"identifier": "serverless_stable_swv01_catalog.medicaid_clinical.fact_quality_events"},
-            {"identifier": "serverless_stable_swv01_catalog.medicaid_clinical.v_yoy_quality_performance"}
+            {"identifier": "serverless_stable_swv01_catalog.medicaid_clinical.fact_quality_events"}
+        ],
+        "metric_views": [
+            {"identifier": "serverless_stable_swv01_catalog.medicaid_clinical.mv_quality_performance"}
         ]
     },
     "instructions": {
@@ -84,10 +86,10 @@ serialized_space = {
                     "=== DATA MODEL (Star Schema) ===\n",
                     "DIMENSIONS: dim_member (1000 rows, PK: member_id) - demographics, aid_category, chronic_condition_flags; dim_county (2500 rows, PK: county_fips) - geography; dim_provider (500 rows, PK: provider_npi) - provider registry; dim_measure (18 rows, PK: measure_id) - HEDIS/CMS measure definitions with thresholds.\n",
                     "FACTS: fact_quality_events (10000 rows) - member x measure x year with in_denominator/in_numerator/exclusion_applied flags; fact_enrollment (3000 rows) - monthly snapshots; fact_claims (10000 rows) - claims with ICD-10 dx_codes and CPT proc_codes.\n",
-                    "VIEW: v_yoy_quality_performance - precomputed YoY rates with threshold_status (Met/At Risk) and trend_direction (Improved/Declined/Stable).\n\n",
+                    "METRIC VIEW: mv_quality_performance - joins fact_quality_events with dim_measure, dim_county, dim_provider, dim_member. Query with MEASURE() function. Measures: denominator, numerator, performance_rate, gap_to_threshold, total_events, exclusion_count, distinct_members, distinct_providers. Dimensions: measure_name, measure_category, measurement_year, quarter, county_name, state_code, region, provider_type, aid_category, gender, race_ethnicity, and more.\n\n",
 
                     "=== JOINS ===\n",
-                    "fact_quality_events.member_id->dim_member.member_id; fact_quality_events.measure_id->dim_measure.measure_id; fact_quality_events.provider_npi->dim_provider.provider_npi; fact_quality_events.county_fips->dim_county.county_fips; fact_enrollment.member_id->dim_member.member_id; fact_enrollment.county_fips->dim_county.county_fips; fact_claims.member_id->dim_member.member_id; fact_claims.provider_npi->dim_provider.provider_npi; dim_member.county_fips->dim_county.county_fips. Use v_yoy_quality_performance for YoY comparisons (already joins fact_quality_events + dim_measure).\n\n",
+                    "fact_quality_events.member_id->dim_member.member_id; fact_quality_events.measure_id->dim_measure.measure_id; fact_quality_events.provider_npi->dim_provider.provider_npi; fact_quality_events.county_fips->dim_county.county_fips; fact_enrollment.member_id->dim_member.member_id; fact_enrollment.county_fips->dim_county.county_fips; fact_claims.member_id->dim_member.member_id; fact_claims.provider_npi->dim_provider.provider_npi; dim_member.county_fips->dim_county.county_fips. Use mv_quality_performance metric view for quality measure analytics - it pre-joins all tables.\n\n",
 
                     "=== JARGON ===\n",
                     "HEDIS: Healthcare Effectiveness Data and Information Set (NCQA quality measures). CMS Core Set: CMS-required Medicaid/CHIP measures. MY: Measurement Year. Performance Rate: (Numerator/Denominator)*100. Regulatory Threshold: min rate required by state contract. At Risk: rate below threshold.\n",
@@ -98,8 +100,10 @@ serialized_space = {
 
                     "=== EXAMPLE QUERIES ===\n",
                     "Enrollment by county: SELECT c.county_name, c.state_code, COUNT(DISTINCT e.member_id) FROM fact_enrollment e JOIN dim_county c USING(county_fips) WHERE e.is_active GROUP BY 1,2 ORDER BY 3 DESC;\n",
-                    "At-risk measures: SELECT measure_name, measure_category, current_year_rate, regulatory_threshold, threshold_status FROM v_yoy_quality_performance WHERE threshold_status = 'At Risk';\n",
-                    "YoY comparison: SELECT measure_name, prior_year_rate, current_year_rate, rate_delta, trend_direction FROM v_yoy_quality_performance ORDER BY ABS(rate_delta) DESC;\n"
+                    "Quality metrics by measure and year (METRIC VIEW): SELECT measure_name, measure_category, measurement_year, MEASURE(performance_rate) as rate, MEASURE(denominator) as denom, MEASURE(numerator) as numer, MEASURE(gap_to_threshold) as gap FROM mv_quality_performance GROUP BY measure_name, measure_category, measurement_year ORDER BY measure_name;\n",
+                    "At-risk measures: SELECT measure_name, measure_category, measurement_year, regulatory_threshold, MEASURE(performance_rate) as rate, MEASURE(gap_to_threshold) as gap FROM mv_quality_performance WHERE MEASURE(gap_to_threshold) > 0 GROUP BY ALL;\n",
+                    "Performance by county: SELECT county_name, state_code, measure_name, MEASURE(performance_rate) as rate FROM mv_quality_performance GROUP BY county_name, state_code, measure_name;\n",
+                    "IMPORTANT: mv_quality_performance is a METRIC VIEW. Always wrap measures in MEASURE() function. Do NOT use SELECT *. Always specify dimensions in GROUP BY.\n"
                 ]
             }
         ]
