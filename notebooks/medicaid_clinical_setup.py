@@ -765,9 +765,372 @@ for t in tables:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Step 9: Create the Genie Space (one-notebook path)
+# MAGIC
+# MAGIC This section is **fully idempotent**: it creates a Genie space the first time you run it,
+# MAGIC then updates the same space on subsequent runs. The space_id is persisted in
+# MAGIC `${CATALOG}.${SCHEMA}.config_genie` so the notebook remembers what it created.
+# MAGIC
+# MAGIC The space ships with: 13 sample questions, 10 benchmark queries (5 standard + 5 window
+# MAGIC function patterns), 10 join specs, SQL snippets (filters/expressions/measures), and a
+# MAGIC text instruction block covering the data model, jargon, and calculation rules.
+
+# COMMAND ----------
+
+# Idempotent config table for the Genie space_id
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.config_genie (
+  config_key STRING NOT NULL COMMENT 'Configuration key, e.g. genie_space_id',
+  config_value STRING COMMENT 'Configuration value',
+  created_at TIMESTAMP COMMENT 'When this config row was written'
+)
+USING DELTA
+COMMENT 'Notebook-managed Genie space configuration. Stores genie_space_id so re-runs PATCH instead of POST.'
+""")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 9.1 Build serialized_space (config + instructions + benchmarks + joins)
+
+# COMMAND ----------
+
+import json
+
+FQN = f"{CATALOG}.{SCHEMA}"
+
+# Look up the SQL warehouse to back the Genie space.
+# In a Databricks notebook, the WAREHOUSE_ID is read from a notebook widget if you have one,
+# otherwise paste your warehouse id below. Find it under SQL Warehouses in the workspace.
+try:
+    WAREHOUSE_ID = dbutils.widgets.get("warehouse_id")  # noqa: F821
+except Exception:
+    WAREHOUSE_ID = "084543d48aafaeb2"  # <-- replace with your SQL warehouse id
+
+GENIE_TITLE = "Medicaid Clinical Quality Measures"
+GENIE_DESCRIPTION = (
+    "Natural-language analytics over a Medicaid clinical quality measures star schema. "
+    "Supports HEDIS and CMS Core Set reporting, year-over-year trends, provider rankings, "
+    "and county-level performance. Backed by the mv_quality_performance metric view for "
+    "governed measure definitions."
+)
+
+# 13 sample questions (5 standard + 8 advanced/window)
+sample_questions = [
+    {"id": "a0000000000000000000000000000001", "question": ["What are our Medicaid enrollment numbers by county?"]},
+    {"id": "a0000000000000000000000000000002", "question": ["Show me clinical quality metrics for the current quarter"]},
+    {"id": "a0000000000000000000000000000003", "question": ["Which measures are at risk of not meeting regulatory thresholds?"]},
+    {"id": "a0000000000000000000000000000004", "question": ["Compare this year's performance vs last year by quality measure"]},
+    {"id": "a0000000000000000000000000000005", "question": ["How are we performing on all diabetes-related quality measures?"]},
+    {"id": "a0000000000000000000000000000006", "question": ["Show behavioral health follow-up rates by quarter"]},
+    {"id": "a0000000000000000000000000000007", "question": ["Which providers have the highest quality measure compliance rates?"]},
+    {"id": "a0000000000000000000000000000008", "question": ["Show enrollment trends by aid category over time"]},
+    {"id": "a0000000000000000000000000000009", "question": ["Rank providers by their quality measure performance rate"]},
+    {"id": "a000000000000000000000000000000a", "question": ["Show quarter-over-quarter performance trend for each measure"]},
+    {"id": "a000000000000000000000000000000b", "question": ["Which providers are in the bottom quartile for quality performance?"]},
+    {"id": "a000000000000000000000000000000c", "question": ["Show cumulative enrollment growth with a 3-month rolling average"]},
+    {"id": "a000000000000000000000000000000d", "question": ["What percentile does each county rank in for diabetes measure performance?"]},
+]
+
+text_instructions = [{
+    "id": "b0000000000000000000000000000010",
+    "content": [
+        "This Genie space provides AI-powered analytics for Medicaid clinical quality measures data. It supports HEDIS and CMS Core Set reporting with year-over-year performance comparisons.\n\n",
+        "=== DATA MODEL (Star Schema) ===\n",
+        "DIMENSIONS: dim_member (1000 rows, PK: member_id) - demographics, aid_category, chronic_condition_flags; dim_county (2500 rows, PK: county_fips) - geography; dim_provider (500 rows, PK: provider_npi) - provider registry; dim_measure (18 rows, PK: measure_id) - HEDIS/CMS measure definitions with thresholds.\n",
+        "FACTS: fact_quality_events (10000 rows) - member x measure x year with in_denominator/in_numerator/exclusion_applied flags; fact_enrollment (3000 rows) - monthly snapshots; fact_claims (10000 rows) - claims with ICD-10 dx_codes and CPT proc_codes.\n",
+        "METRIC VIEW: mv_quality_performance - joins fact_quality_events with dim_measure, dim_county, dim_provider, dim_member. Query with MEASURE() function. Measures: denominator, numerator, performance_rate, gap_to_threshold, total_events, exclusion_count, distinct_members, distinct_providers. Dimensions: measure_name, measure_category, measurement_year, quarter, county_name, state_code, region, provider_type, aid_category, gender, race_ethnicity, and more.\n\n",
+        "=== JARGON ===\n",
+        "HEDIS: Healthcare Effectiveness Data and Information Set (NCQA quality measures). CMS Core Set: CMS-required Medicaid/CHIP measures. MY: Measurement Year. Performance Rate: (Numerator/Denominator)*100. Regulatory Threshold: min rate required by state contract. At Risk: rate below threshold.\n",
+        "Aid Categories: TANF, SSI, CHIP, Expansion Adult. Claim Types: IP, OP, Prof, Rx. Provider Types: PCP, FQHC, BH. SMI: Serious Mental Illness. MCO: Managed Care Organization. FFS: Fee-For-Service. SUD: Substance Use Disorder. PMPM: Per Member Per Month.\n\n",
+        "=== CALCULATION RULES ===\n",
+        "Performance Rate = COUNT(in_numerator AND NOT exclusion_applied) * 100.0 / NULLIF(COUNT(in_denominator AND NOT exclusion_applied), 0). For 'Lower is Better' measures (CDC-HbA1c, PCR), lower rate = better. For all others, higher rate = better.\n",
+        "IMPORTANT: mv_quality_performance is a METRIC VIEW. Always wrap measures in MEASURE() function. Do NOT use SELECT *. Always specify dimensions in GROUP BY.\n\n",
+        "=== WINDOW FUNCTION PATTERNS ===\n",
+        "Use window functions for ranking, trending, and comparative analytics on the base tables (NOT the metric view). The metric view uses MEASURE() aggregates only.\n\n",
+        "RANK/DENSE_RANK: Rank providers or counties by performance rate within each measure. Use RANK() OVER(PARTITION BY measure_name ORDER BY performance_rate DESC).\n",
+        "LAG/LEAD: Show quarter-over-quarter or year-over-year changes. Use LAG(performance_rate) OVER(PARTITION BY measure_name ORDER BY measurement_year, quarter).\n",
+        "NTILE: Classify providers or counties into quartiles. Use NTILE(4) OVER(ORDER BY performance_rate). Quartile 1 = bottom 25%.\n",
+        "RUNNING SUM/AVG: Use SUM(x) OVER(ORDER BY snapshot_month) for cumulative; AVG(x) OVER(ORDER BY snapshot_month ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) for 3-month rolling.\n",
+        "PERCENT_RANK: Use ROUND(PERCENT_RANK() OVER(PARTITION BY measure_name ORDER BY performance_rate) * 100, 1) for 0-100 percentile.\n",
+        "Always compute performance_rate in an inner query (GROUP BY) and apply window functions in the outer query.\n",
+    ],
+}]
+
+# 10 join specs - sql array MUST have 2 elements: backtick-aliased condition + relationship-type annotation
+def _join(jid, lt, lc, rt, rc, comment, instruction):
+    return {
+        "id": jid,
+        "left": {"identifier": f"{FQN}.{lt}", "alias": lt},
+        "right": {"identifier": f"{FQN}.{rt}", "alias": rt},
+        "sql": [f"`{lt}`.{lc} = `{rt}`.{rc}", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
+        "comment": [comment],
+        "instruction": [instruction],
+    }
+
+join_specs = [
+    _join("e0000000000000000000000000000001", "dim_member", "county_fips", "dim_county", "county_fips",
+          "Join member to county for geographic analysis of member residence",
+          "Use when you need member county name, state, region, or urban/rural classification"),
+    _join("e0000000000000000000000000000002", "dim_provider", "county_fips", "dim_county", "county_fips",
+          "Join provider to county for provider practice location analysis",
+          "Use when you need provider location details"),
+    _join("e0000000000000000000000000000003", "fact_claims", "member_id", "dim_member", "member_id",
+          "Join claims to member demographics",
+          "Use when analyzing claims by member demographics like aid category, gender, or chronic conditions"),
+    _join("e0000000000000000000000000000004", "fact_claims", "provider_npi", "dim_provider", "provider_npi",
+          "Join claims to provider for provider-level claims analysis",
+          "Use when analyzing claims by provider type or specific providers"),
+    _join("e0000000000000000000000000000005", "fact_enrollment", "county_fips", "dim_county", "county_fips",
+          "Join enrollment to county for enrollment by geography",
+          "Use when analyzing enrollment numbers by county, state, or region"),
+    _join("e0000000000000000000000000000006", "fact_enrollment", "member_id", "dim_member", "member_id",
+          "Join enrollment to member demographics",
+          "Use when analyzing enrollment trends by member demographics"),
+    _join("e0000000000000000000000000000007", "fact_quality_events", "county_fips", "dim_county", "county_fips",
+          "Join quality events to county for geographic quality analysis",
+          "Use when analyzing quality measure performance by county or region"),
+    _join("e0000000000000000000000000000008", "fact_quality_events", "measure_id", "dim_measure", "measure_id",
+          "Join quality events to measure definitions for measure metadata",
+          "Use when you need measure name, category, thresholds, or reporting direction"),
+    _join("e0000000000000000000000000000009", "fact_quality_events", "member_id", "dim_member", "member_id",
+          "Join quality events to member demographics",
+          "Use when analyzing quality measures by member demographics, aid category, or chronic conditions"),
+    _join("e000000000000000000000000000000a", "fact_quality_events", "provider_npi", "dim_provider", "provider_npi",
+          "Join quality events to provider for provider-level quality analysis",
+          "Use when analyzing quality measure compliance by provider type or specific providers"),
+]
+
+# SQL snippets - reusable filters, expressions, and measures
+sql_snippets = {
+    "filters": [
+        {"id": "f0000000000000000000000000000001", "sql": ["fact_enrollment.is_active = TRUE"],
+         "display_name": "active members only", "synonyms": ["currently enrolled", "active enrollment"],
+         "comment": ["Filters to only actively enrolled members"],
+         "instruction": ["Use when counting current enrollment or active members"]},
+        {"id": "f0000000000000000000000000000002",
+         "sql": ["fact_quality_events.in_denominator = TRUE AND fact_quality_events.exclusion_applied = FALSE"],
+         "display_name": "eligible for measure", "synonyms": ["in denominator", "eligible population", "measure eligible"],
+         "comment": ["Filters to members eligible for a quality measure (in denominator, no exclusion)"],
+         "instruction": ["Use as base filter when calculating quality measure rates"]},
+        {"id": "f0000000000000000000000000000003", "sql": ["dim_measure.high_priority_flag = TRUE"],
+         "display_name": "high priority measures", "synonyms": ["CMS priority", "key measures", "critical measures"],
+         "comment": ["Filters to CMS-designated high-priority quality measures"],
+         "instruction": ["Use when focusing on the most important measures for regulatory reporting"]},
+        {"id": "f0000000000000000000000000000004", "sql": ["dim_measure.star_rating_flag = TRUE"],
+         "display_name": "star rating measures", "synonyms": ["star measures", "plan rating measures"],
+         "comment": ["Filters to measures included in health plan star ratings"],
+         "instruction": ["Use when analyzing measures that impact plan star ratings"]},
+    ],
+    "expressions": [
+        {"id": "f0000000000000000000000000000005", "alias": "measurement_quarter",
+         "sql": ["CONCAT(fact_quality_events.measurement_year, '-Q', fact_quality_events.quarter)"],
+         "display_name": "measurement quarter", "synonyms": ["quarter", "reporting quarter"],
+         "comment": ["Formats measurement year and quarter as YYYY-QN"],
+         "instruction": ["Use for quarter-level trend analysis labels"]},
+        {"id": "f0000000000000000000000000000006", "alias": "member_age",
+         "sql": ["FLOOR(DATEDIFF(CURRENT_DATE(), dim_member.date_of_birth) / 365.25)"],
+         "display_name": "member age", "synonyms": ["age", "patient age", "enrollee age"],
+         "comment": ["Calculates current age in years from date of birth"],
+         "instruction": ["Use when analyzing by age group or checking age-based eligibility"]},
+        {"id": "f0000000000000000000000000000007", "alias": "enrollment_month_label",
+         "sql": ["DATE_FORMAT(fact_enrollment.snapshot_month, 'yyyy-MM')"],
+         "display_name": "enrollment month", "synonyms": ["month", "snapshot month"],
+         "comment": ["Formats enrollment snapshot month as YYYY-MM"],
+         "instruction": ["Use for monthly enrollment trend labels"]},
+    ],
+    "measures": [
+        {"id": "f0000000000000000000000000000008", "alias": "performance_rate",
+         "sql": ["ROUND(COUNT(CASE WHEN fact_quality_events.in_numerator AND NOT fact_quality_events.exclusion_applied THEN 1 END) * 100.0 / NULLIF(COUNT(CASE WHEN fact_quality_events.in_denominator AND NOT fact_quality_events.exclusion_applied THEN 1 END), 0), 2)"],
+         "display_name": "performance rate", "synonyms": ["compliance rate", "quality rate", "HEDIS rate"],
+         "comment": ["Quality measure performance rate: (numerator / denominator) * 100. Excludes valid exclusions."],
+         "instruction": ["Use for calculating quality measure compliance rates."]},
+        {"id": "f0000000000000000000000000000009", "alias": "total_paid",
+         "sql": ["ROUND(SUM(fact_claims.paid_amount), 2)"],
+         "display_name": "total paid amount", "synonyms": ["total cost", "total spend", "paid claims"],
+         "comment": ["Sum of all claim paid amounts in USD"],
+         "instruction": ["Use for claims cost analysis and financial reporting"]},
+        {"id": "f000000000000000000000000000000a", "alias": "pmpm_cost",
+         "sql": ["ROUND(SUM(fact_claims.paid_amount) / NULLIF(COUNT(DISTINCT fact_claims.member_id), 0), 2)"],
+         "display_name": "per member cost", "synonyms": ["PMPM", "per member per month"],
+         "comment": ["Average paid amount per unique member"],
+         "instruction": ["Use for per-member cost analysis and PMPM calculations"]},
+    ],
+}
+
+# 10 benchmarks: 5 standard aggregation + 5 window function patterns
+benchmarks_questions = [
+    {"id": "b0000000000000000000000000000001",
+     "question": ["What are our Medicaid enrollment numbers by county?"],
+     "answer": [{"format": "SQL", "content": [f"SELECT c.county_name, c.state_code, COUNT(DISTINCT e.member_id) as enrolled_members, SUM(CASE WHEN e.is_active THEN 1 ELSE 0 END) as active_member_months FROM {FQN}.fact_enrollment e JOIN {FQN}.dim_county c ON e.county_fips = c.county_fips GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 15"]}]},
+    {"id": "b0000000000000000000000000000002",
+     "question": ["Show me clinical quality metrics for the current quarter"],
+     "answer": [{"format": "SQL", "content": [f"SELECT measure_name, measure_category, reporting_direction, regulatory_threshold, MEASURE(denominator) as denominator, MEASURE(numerator) as numerator, MEASURE(performance_rate) as performance_rate, MEASURE(gap_to_threshold) as gap_to_threshold FROM {FQN}.mv_quality_performance WHERE measurement_year = 2025 AND quarter = 1 GROUP BY measure_name, measure_category, reporting_direction, regulatory_threshold ORDER BY measure_name"]}]},
+    {"id": "b0000000000000000000000000000003",
+     "question": ["Which measures are at risk of not meeting regulatory thresholds?"],
+     "answer": [{"format": "SQL", "content": [f"SELECT * FROM (SELECT measure_name, measure_category, measurement_year, reporting_direction, regulatory_threshold, MEASURE(performance_rate) as performance_rate, MEASURE(gap_to_threshold) as gap_to_threshold, MEASURE(denominator) as denominator FROM {FQN}.mv_quality_performance WHERE measurement_year = 2025 GROUP BY measure_name, measure_category, measurement_year, reporting_direction, regulatory_threshold) WHERE (reporting_direction = 'Higher is Better' AND performance_rate < regulatory_threshold) OR (reporting_direction = 'Lower is Better' AND performance_rate > regulatory_threshold) ORDER BY ABS(gap_to_threshold) DESC"]}]},
+    {"id": "b0000000000000000000000000000004",
+     "question": ["Compare this year performance vs last year by quality measure"],
+     "answer": [{"format": "SQL", "content": [f"SELECT measure_name, measure_category, measurement_year, MEASURE(performance_rate) as performance_rate, MEASURE(denominator) as denominator, MEASURE(numerator) as numerator, MEASURE(distinct_members) as distinct_members FROM {FQN}.mv_quality_performance GROUP BY measure_name, measure_category, measurement_year ORDER BY measure_name, measurement_year"]}]},
+    {"id": "b0000000000000000000000000000005",
+     "question": ["Show claims cost breakdown by claim type and aid category"],
+     "answer": [{"format": "SQL", "content": [f"SELECT cl.claim_type, m.aid_category, COUNT(*) as claim_count, ROUND(SUM(cl.paid_amount), 2) as total_paid, ROUND(AVG(cl.paid_amount), 2) as avg_paid, COUNT(DISTINCT cl.member_id) as unique_members FROM {FQN}.fact_claims cl JOIN {FQN}.dim_member m ON cl.member_id = m.member_id GROUP BY 1, 2 ORDER BY 4 DESC"]}]},
+    # Window function benchmarks
+    {"id": "b0000000000000000000000000000006",
+     "question": ["Rank providers by their quality measure performance rate"],
+     "answer": [{"format": "SQL", "content": [f"SELECT provider_name, provider_type, measure_name, performance_rate, provider_rank FROM (SELECT p.provider_name, p.provider_type, m.measure_name, ROUND(COUNT(CASE WHEN q.in_numerator AND NOT q.exclusion_applied THEN 1 END) * 100.0 / NULLIF(COUNT(CASE WHEN q.in_denominator AND NOT q.exclusion_applied THEN 1 END), 0), 2) as performance_rate, RANK() OVER(PARTITION BY m.measure_name ORDER BY COUNT(CASE WHEN q.in_numerator AND NOT q.exclusion_applied THEN 1 END) * 100.0 / NULLIF(COUNT(CASE WHEN q.in_denominator AND NOT q.exclusion_applied THEN 1 END), 0) DESC) as provider_rank FROM {FQN}.fact_quality_events q JOIN {FQN}.dim_provider p ON q.provider_npi = p.provider_npi JOIN {FQN}.dim_measure m ON q.measure_id = m.measure_id WHERE q.measurement_year = 2025 AND m.reporting_direction = 'Higher is Better' GROUP BY p.provider_name, p.provider_type, m.measure_name) ranked ORDER BY measure_name, provider_rank"]}]},
+    {"id": "b0000000000000000000000000000007",
+     "question": ["Show quarter-over-quarter performance trend for each measure"],
+     "answer": [{"format": "SQL", "content": [f"SELECT measure_name, measurement_year, quarter, performance_rate, LAG(performance_rate) OVER(PARTITION BY measure_name ORDER BY measurement_year, quarter) as prev_quarter_rate, ROUND(performance_rate - LAG(performance_rate) OVER(PARTITION BY measure_name ORDER BY measurement_year, quarter), 2) as qoq_change FROM (SELECT m.measure_name, q.measurement_year, q.quarter, ROUND(COUNT(CASE WHEN q.in_numerator AND NOT q.exclusion_applied THEN 1 END) * 100.0 / NULLIF(COUNT(CASE WHEN q.in_denominator AND NOT q.exclusion_applied THEN 1 END), 0), 2) as performance_rate FROM {FQN}.fact_quality_events q JOIN {FQN}.dim_measure m ON q.measure_id = m.measure_id GROUP BY m.measure_name, q.measurement_year, q.quarter) rates ORDER BY measure_name, measurement_year, quarter"]}]},
+    {"id": "b0000000000000000000000000000008",
+     "question": ["Which providers are in the bottom quartile for quality performance?"],
+     "answer": [{"format": "SQL", "content": [f"SELECT provider_name, provider_type, overall_performance_rate, performance_quartile FROM (SELECT p.provider_name, p.provider_type, ROUND(COUNT(CASE WHEN q.in_numerator AND NOT q.exclusion_applied THEN 1 END) * 100.0 / NULLIF(COUNT(CASE WHEN q.in_denominator AND NOT q.exclusion_applied THEN 1 END), 0), 2) as overall_performance_rate, NTILE(4) OVER(ORDER BY COUNT(CASE WHEN q.in_numerator AND NOT q.exclusion_applied THEN 1 END) * 100.0 / NULLIF(COUNT(CASE WHEN q.in_denominator AND NOT q.exclusion_applied THEN 1 END), 0)) as performance_quartile FROM {FQN}.fact_quality_events q JOIN {FQN}.dim_provider p ON q.provider_npi = p.provider_npi WHERE q.measurement_year = 2025 GROUP BY p.provider_name, p.provider_type) ranked WHERE performance_quartile = 1 ORDER BY overall_performance_rate"]}]},
+    {"id": "b0000000000000000000000000000009",
+     "question": ["Show cumulative enrollment growth with a 3-month rolling average"],
+     "answer": [{"format": "SQL", "content": [f"SELECT snapshot_month, monthly_active_members, SUM(monthly_active_members) OVER(ORDER BY snapshot_month) as cumulative_member_months, ROUND(AVG(monthly_active_members) OVER(ORDER BY snapshot_month ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), 0) as rolling_3mo_avg FROM (SELECT e.snapshot_month, COUNT(DISTINCT e.member_id) as monthly_active_members FROM {FQN}.fact_enrollment e WHERE e.is_active = TRUE GROUP BY e.snapshot_month) monthly ORDER BY snapshot_month"]}]},
+    {"id": "b000000000000000000000000000000a",
+     "question": ["What percentile does each county rank in for diabetes measure performance?"],
+     "answer": [{"format": "SQL", "content": [f"SELECT county_name, state_code, measure_name, performance_rate, ROUND(PERCENT_RANK() OVER(PARTITION BY measure_name ORDER BY performance_rate) * 100, 1) as percentile_rank FROM (SELECT c.county_name, c.state_code, m.measure_name, ROUND(COUNT(CASE WHEN q.in_numerator AND NOT q.exclusion_applied THEN 1 END) * 100.0 / NULLIF(COUNT(CASE WHEN q.in_denominator AND NOT q.exclusion_applied THEN 1 END), 0), 2) as performance_rate FROM {FQN}.fact_quality_events q JOIN {FQN}.dim_county c ON q.county_fips = c.county_fips JOIN {FQN}.dim_measure m ON q.measure_id = m.measure_id WHERE q.measurement_year = 2025 AND m.measure_category = 'Diabetes' GROUP BY c.county_name, c.state_code, m.measure_name) county_rates ORDER BY measure_name, percentile_rank DESC"]}]},
+]
+
+serialized_space = {
+    "version": 2,
+    "config": {"sample_questions": sample_questions},
+    "data_sources": {
+        "tables": [
+            {"identifier": f"{FQN}.dim_county"},
+            {"identifier": f"{FQN}.dim_measure"},
+            {"identifier": f"{FQN}.dim_member"},
+            {"identifier": f"{FQN}.dim_provider"},
+            {"identifier": f"{FQN}.fact_claims"},
+            {"identifier": f"{FQN}.fact_enrollment"},
+            {"identifier": f"{FQN}.fact_quality_events"},
+        ],
+        "metric_views": [{"identifier": f"{FQN}.mv_quality_performance"}],
+    },
+    "instructions": {
+        "text_instructions": text_instructions,
+        "example_question_sqls": [],
+        "sql_snippets": sql_snippets,
+        "join_specs": join_specs,
+    },
+    "benchmarks": {"questions": benchmarks_questions},
+}
+
+print(f"Built serialized_space: "
+      f"{len(sample_questions)} sample questions, "
+      f"{len(benchmarks_questions)} benchmarks, "
+      f"{len(join_specs)} joins, "
+      f"{sum(len(v) for v in sql_snippets.values())} snippets.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 9.2 Create or update the Genie space (idempotent)
+
+# COMMAND ----------
+
+from databricks.sdk import WorkspaceClient
+
+w = WorkspaceClient()
+
+existing_id_row = spark.sql(
+    f"SELECT config_value FROM {CATALOG}.{SCHEMA}.config_genie WHERE config_key = 'genie_space_id' ORDER BY created_at DESC LIMIT 1"
+).collect()
+existing_space_id = existing_id_row[0]["config_value"] if existing_id_row else None
+
+payload = {
+    "title": GENIE_TITLE,
+    "description": GENIE_DESCRIPTION,
+    "warehouse_id": WAREHOUSE_ID,
+    "serialized_space": json.dumps(serialized_space),
+}
+
+if existing_space_id:
+    print(f"Found existing genie_space_id={existing_space_id}; PATCHing.")
+    resp = w.api_client.do("PATCH", f"/api/2.0/genie/spaces/{existing_space_id}", body=payload)
+    space_id = existing_space_id
+    print(f"PATCH ok. title={resp.get('title')}")
+else:
+    print("No existing genie_space_id; POSTing a new space.")
+    resp = w.api_client.do("POST", "/api/2.0/genie/spaces", body=payload)
+    space_id = resp.get("space_id")
+    print(f"POST ok. space_id={space_id}")
+    spark.sql(f"""
+      INSERT INTO {CATALOG}.{SCHEMA}.config_genie
+      SELECT 'genie_space_id' as config_key, '{space_id}' as config_value, current_timestamp() as created_at
+    """)
+
+host = w.config.host.rstrip("/")
+print(f"\nGenie Space URL: {host}/genie/rooms/{space_id}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 10 (optional): Row-Filter Cascade Demo
+# MAGIC
+# MAGIC Demonstrates a **gotcha-correct** governance pattern: row filters can ONLY be attached to base
+# MAGIC tables. They cascade automatically through views and metric views into Genie. This cell
+# MAGIC creates a UC SQL function that restricts non-admin users to a single state, then attaches it
+# MAGIC as a row filter on `dim_member`. Every Genie query that touches member-level data is
+# MAGIC transparently filtered for the calling user.
+# MAGIC
+# MAGIC Skip this cell if you do not want to apply row-level security to the demo. To remove the
+# MAGIC filter later: `ALTER TABLE dim_member DROP ROW FILTER`.
+
+# COMMAND ----------
+
+# Adjust this group to one you actually own. If the group does not exist, the function still
+# works — it just defaults to the deny branch and shows nothing for non-admin callers, which is
+# the safe default.
+ADMIN_GROUP = "account users"          # change to your admin group, e.g. "phi_admins"
+DEFAULT_STATE_FILTER = "CA"            # state non-admins are restricted to via dim_county.state_code
+
+# Helper function: returns TRUE if caller may see the member row.
+spark.sql(f"""
+CREATE OR REPLACE FUNCTION {CATALOG}.{SCHEMA}.member_state_filter(member_state STRING)
+RETURNS BOOLEAN
+RETURN
+  IS_ACCOUNT_GROUP_MEMBER('{ADMIN_GROUP}')
+  OR member_state = '{DEFAULT_STATE_FILTER}'
+""")
+
+# dim_member has no state_code directly — it joins through dim_county. To keep the row filter
+# self-contained, we materialize state_code onto dim_member as a generated/managed column at
+# load time in production. For this demo, we approximate with a subquery via a UC function that
+# accepts member_id and resolves state.
+spark.sql(f"""
+CREATE OR REPLACE FUNCTION {CATALOG}.{SCHEMA}.member_id_state_filter(mid STRING)
+RETURNS BOOLEAN
+RETURN
+  IS_ACCOUNT_GROUP_MEMBER('{ADMIN_GROUP}')
+  OR EXISTS (
+    SELECT 1
+    FROM {CATALOG}.{SCHEMA}.dim_member m
+    JOIN {CATALOG}.{SCHEMA}.dim_county c ON m.county_fips = c.county_fips
+    WHERE m.member_id = mid
+      AND c.state_code = '{DEFAULT_STATE_FILTER}'
+  )
+""")
+
+# Attach the row filter on dim_member. NOTE: row filters cannot be applied to views/metric views;
+# they cascade through automatically.
+spark.sql(f"""
+ALTER TABLE {CATALOG}.{SCHEMA}.dim_member
+SET ROW FILTER {CATALOG}.{SCHEMA}.member_id_state_filter ON (member_id)
+""")
+
+print("Row filter applied to dim_member. It will cascade through fact_quality_events, fact_claims, "
+      "fact_enrollment, and mv_quality_performance for any query Genie generates.")
+print(f"Non-admin users will only see rows where dim_county.state_code = '{DEFAULT_STATE_FILTER}'.")
+print("To remove: ALTER TABLE dim_member DROP ROW FILTER")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Next Steps
 # MAGIC
-# MAGIC 1. **Create a Genie Space** — Add the tables above to an AI/BI Genie space for natural language querying
-# MAGIC 2. **Build AI/BI Dashboards** — Create dashboards with filters by county, measure category, and threshold status
-# MAGIC 3. **Apply Row-Level Security** — Use the PHI/PII tags to create access policies
-# MAGIC 4. **Schedule Refreshes** — Set up workflows to refresh fact tables from source systems
+# MAGIC 1. **Open the Genie Space URL** printed above and ask a few questions to validate.
+# MAGIC 2. **Build AI/BI Dashboards** — filters by county, measure category, threshold status.
+# MAGIC 3. **Tighten governance** — extend the row-filter pattern in Step 10 to your real groups.
+# MAGIC 4. **Schedule Refreshes** — set up workflows to refresh fact tables from source systems.

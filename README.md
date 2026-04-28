@@ -1,15 +1,45 @@
 # Medicaid Clinical Quality Measures — Genie Room Demo
 
-An end-to-end demo environment for Databricks AI/BI Genie, built on a Medicaid clinical quality data warehouse. Ask questions about HEDIS measures, enrollment trends, claims costs, and provider performance in plain English — Genie writes the SQL.
+An end-to-end, open-source demo of [Databricks AI/BI Genie](https://docs.databricks.com/aws/en/genie/) on a Medicaid clinical quality data warehouse. Ask questions about HEDIS measures, enrollment, claims costs, and provider performance in plain English — Genie writes the SQL, the metric view enforces the math, and Unity Catalog enforces the governance.
 
-## What This Demo Shows
+## What is a Genie Space?
 
-This Genie room demonstrates how a healthcare payer's quality team can get instant, governed, natural-language access to clinical quality analytics without writing SQL. It covers:
+A [Genie space](https://docs.databricks.com/aws/en/genie/) is a curated natural-language interface over a set of Unity Catalog tables and metric views. Business users type questions; Genie generates SQL, executes it on a serverless SQL warehouse, and returns answers as tables, charts, or values. The "curation" lives in the space's `serialized_space` — a JSON document that bundles:
 
-- **Standard analytics**: Enrollment by county, quality measure rates, at-risk measures, year-over-year comparisons
-- **Advanced window functions**: Provider rankings (RANK), quarter-over-quarter trends (LAG), performance quartiles (NTILE), cumulative enrollment (running SUM), county percentiles (PERCENT_RANK)
-- **Metric view semantics**: Pre-defined HEDIS-compliant rate formulas via MEASURE() functions ensure calculation consistency
-- **Governance**: PHI/PII tagging, column-level classification, Unity Catalog enforcement on every query Genie generates
+- **Sample questions** — chips that appear in the room as starter prompts
+- **Text instructions** — domain context (jargon, calculation rules, do/don't guidance)
+- **SQL snippets** — reusable filters, expressions, and measures Genie can compose
+- **Join specs** — declarative relationships between tables so Genie joins them correctly
+- **Benchmarks** — example question-to-SQL pairs that act as few-shot examples
+
+This repo builds **all of that** for a Medicaid clinical use case: 13 sample questions, 1 instruction block, 10 SQL snippets, 10 join specs, and 10 benchmark queries (5 standard aggregation + 5 window-function patterns).
+
+## Why this demo is interesting
+
+Two things in this build are worth a closer look:
+
+### `mv_quality_performance` — a metric view as the semantic layer
+
+The HEDIS performance-rate formula is ugly:
+
+```
+ROUND(COUNT(CASE WHEN in_numerator AND NOT exclusion_applied THEN 1 END) * 100.0
+      / NULLIF(COUNT(CASE WHEN in_denominator AND NOT exclusion_applied THEN 1 END), 0), 2)
+```
+
+If every analyst writes that by hand, half of them will write it wrong. The [metric view](https://docs.databricks.com/aws/en/metric-views/) defines it once in YAML and exposes it as `MEASURE(performance_rate)`. Genie generates `MEASURE(performance_rate)` instead of trying to reconstruct the formula — every answer uses the same, audit-correct math.
+
+The metric view also pre-joins the four dimensions onto `fact_quality_events`, so any of 20+ dimensions (`measure_name`, `county_name`, `provider_type`, `aid_category`, `gender`, `race_ethnicity`, `quarter`, etc.) is one `GROUP BY` away. Eight `MEASURE()` expressions × 20+ dimensions = a wide cube without writing a join.
+
+### `dim_measure` — the small reference table that earns its keep
+
+Eighteen rows. Three boolean flags (`high_priority_flag`, `star_rating_flag`, plus `reporting_direction` enum). One `regulatory_threshold` per measure. That's enough metadata to power some of the most useful Genie answers in the space:
+
+- **"Which measures are at risk?"** uses `regulatory_threshold` + `reporting_direction` to flip the `<` vs `>` comparison correctly for "Higher is Better" (most measures) vs "Lower is Better" (CDC-HbA1c, Plan All-Cause Readmissions).
+- **"Show only the high-priority measures"** picks up the `high_priority_flag` snippet and filters automatically.
+- **"How are diabetes measures trending?"** uses `measure_category` for a clean group-by.
+
+Small, well-commented, well-tagged dimension tables are the unsung heroes of every good Genie space.
 
 ## Architecture
 
@@ -29,7 +59,7 @@ dim_county ---county_fips--- fact_quality_events ---provider_npi--- dim_provider
 
          mv_quality_performance (metric view)
          └── pre-joins all 4 dimensions to fact_quality_events
-         └── 8 MEASURE() aggregates + 20 dimensions
+         └── 8 MEASURE() aggregates + 20+ dimensions
 ```
 
 | Table | Type | Rows | Description |
@@ -38,171 +68,108 @@ dim_county ---county_fips--- fact_quality_events ---provider_npi--- dim_provider
 | `dim_county` | Dimension | 2,500 | County FIPS codes, state, region, urban/rural classification |
 | `dim_provider` | Dimension | 500 | Provider NPI, type (PCP, FQHC, BH, etc.), specialty |
 | `dim_measure` | Dimension | 18 | HEDIS/CMS quality measure definitions with thresholds |
-| `fact_quality_events` | Fact | 10,000 | Member x measure x year with in_denominator/in_numerator flags |
+| `fact_quality_events` | Fact | 10,000 | Member × measure × year with in_denominator/in_numerator flags |
 | `fact_enrollment` | Fact | 3,000 | Monthly enrollment snapshots by member |
 | `fact_claims` | Fact | 10,000 | Claims with ICD-10 dx_codes, CPT proc_codes, paid amounts |
-| `mv_quality_performance` | Metric View | — | Pre-joined quality analytics with MEASURE() functions |
+| `mv_quality_performance` | Metric View | — | Pre-joined quality analytics with `MEASURE()` functions |
 
-## Setup Guide
+---
 
-### Prerequisites
+## Quickstart — recreate this Genie space in your own workspace
 
-- A Databricks workspace (Free Trial, Community Edition, or any paid tier)
-- A SQL warehouse (Serverless recommended; Pro works too)
-- A catalog and schema you can write to (or permissions to create one)
-- Databricks CLI installed and authenticated (`databricks auth login`)
+You have two paths. Both end at the same Genie space.
 
-### Step 1: Configure Your Environment
+### Path A — Databricks Free Edition (zero cost, ~10 min)
 
-Edit the catalog and schema names in the scripts to match your workspace. The default is `serverless_stable_swv01_catalog.medicaid_clinical` — you'll want to change this.
+[Free Edition](https://docs.databricks.com/aws/en/getting-started/free-edition) is a no-credit-card, single-user workspace with a serverless SQL warehouse pre-provisioned. It's ideal for trying this demo without involving your IT team.
 
-**Files to update:**
+1. **Sign up**: [databricks.com/learn/free-edition](https://www.databricks.com/learn/free-edition). Pick AWS or Azure (either works).
+2. **Get your SQL warehouse ID**: in the left nav click **SQL Warehouses**, click the default warehouse, and copy the **ID** from the URL (`/sql/warehouses/<warehouse_id>`).
+3. **Pick a catalog and schema**: Free Edition gives you a `workspace` catalog. Use schema name `medicaid_clinical`.
+4. **Import the notebook**: in your workspace, click **Workspace** → click your username → **⋯ menu** → **Import** → upload `notebooks/medicaid_clinical_setup.py`. ([How to import notebooks](https://docs.databricks.com/aws/en/notebooks/notebook-export-import))
+5. **Edit two lines at the top of the notebook**:
+   ```python
+   CATALOG = "workspace"          # or your Free Edition catalog
+   SCHEMA  = "medicaid_clinical"
+   ```
+   And in Step 9.1, set `WAREHOUSE_ID` to the id you copied.
+6. **Click "Run all"**. The notebook creates the schema, generates 30K rows of synthetic data, builds the metric view, applies governance tags, then creates a Genie space and prints its URL.
+7. **Open the URL**, ask "Which measures are at risk of not meeting regulatory thresholds?" — you should see a chart in seconds.
 
-| File | Variable(s) to change |
-|------|----------------------|
-| `generate_data.py` | `CATALOG`, `SCHEMA` (line 14-15) |
-| `execute_sql.py` | `PROFILE`, `WAREHOUSE` (line 12-13) |
-| `create_genie_space.py` | `PROFILE`, `WAREHOUSE` (line 9-10) |
-| `update_genie_space.py` | `PROFILE`, `WAREHOUSE`, `SPACE_ID` (line 12-14) |
-| `add_window_functions.py` | `PROFILE`, `WAREHOUSE`, `SPACE_ID` (line 12-14) |
-| `create_tables.sql` | Replace all `serverless_stable_swv01_catalog.medicaid_clinical` references |
-| `create_metric_view.sql` | Replace all `serverless_stable_swv01_catalog.medicaid_clinical` references |
+That's it. Re-running the notebook is safe — it PATCHes the same Genie space instead of creating a new one (the `space_id` is persisted in `config_genie`).
 
-**Tip**: Use find-and-replace across all `.sql` and `.py` files:
-```bash
-# Replace catalog.schema references
-find . -name '*.sql' -o -name '*.py' | xargs sed -i '' \
-  's/serverless_stable_swv01_catalog\.medicaid_clinical/YOUR_CATALOG.YOUR_SCHEMA/g'
-```
+### Path B — Your existing Databricks workspace
 
-### Step 2: Create Tables and Load Data
+Same as Path A, but with your own catalog/schema. Required permissions:
+- `USE CATALOG` + `CREATE SCHEMA` on a catalog you own
+- A SQL warehouse (Serverless or Pro) you can run queries on
+- `databricks.genie:create_space` (any user with workspace access in most workspaces)
 
-**Option A: Databricks Notebook (recommended for quick setup)**
+Open `notebooks/medicaid_clinical_setup.py`, set `CATALOG`, `SCHEMA`, and `WAREHOUSE_ID`, then **Run all**.
 
-1. Import `notebooks/medicaid_clinical_setup.py` into your workspace
-2. Update the `CATALOG` variable at the top of the notebook
-3. Attach to your SQL warehouse or compute cluster
-4. Run all cells — this creates tables, generates data, creates the metric view, and applies governance tags in one go
+### Path C — CLI scripts (for CI/CD or scripted environments)
 
-**Option B: CLI Scripts (for automation or CI/CD)**
+Useful if you want to build the space from a build pipeline rather than an interactive notebook.
 
 ```bash
-# 1. Generate synthetic data (creates insert_data.sql)
+# 1. Authenticate the Databricks CLI
+databricks auth login --host https://<your-workspace>.cloud.databricks.com
+
+# 2. Edit PROFILE, WAREHOUSE, CATALOG, SCHEMA in each script (top of file)
+
+# 3. Generate data and load tables
 python generate_data.py
-
-# 2. Create the tables
 python execute_sql.py create_tables.sql
-
-# 3. Load the data
 python execute_sql.py insert_data.sql
-
-# 4. Apply PHI/PII governance tags
 python execute_sql.py apply_tags.sql
-
-# 5. Create the metric view
 python execute_sql.py create_metric_view.sql
-```
 
-### Step 3: Create the Genie Space
-
-```bash
-# Create the Genie space with sample questions, instructions, and benchmarks
+# 4. Create the Genie space (prints space_id and URL)
 python create_genie_space.py
-```
 
-This outputs the Genie Space URL. Save it — you'll need it for the next steps and for sharing.
-
-### Step 4: Add Structured Configuration
-
-```bash
-# Add join specs, SQL snippets, and benchmark queries
+# 5. Apply structured config: joins, snippets, benchmarks
+#    NOTE: copy the space_id from step 4 into update_genie_space.py and add_window_functions.py
 python update_genie_space.py
+python add_window_functions.py        # MUST run AFTER update_genie_space.py
 ```
 
-### Step 5: Add Window Function Benchmarks
+> ⚠️ **Order matters**: `update_genie_space.py` overwrites `benchmarks` with the 5 standard ones, so you must run `add_window_functions.py` *after* it to layer in the 5 window-function benchmarks. The notebook (Path A/B) builds all 10 in a single PATCH, so this ordering trap doesn't apply there.
 
-```bash
-# Add 5 window function benchmarks and sample questions
-python add_window_functions.py
-```
+---
 
-### Step 6: Verify
+## Try it in 60 seconds
 
-Open the Genie Space URL in your browser. You should see 13 sample questions. Try asking:
+Open the Genie space URL and ask:
 
-1. "What are our Medicaid enrollment numbers by county?" — validates basic table joins
-2. "Which measures are at risk of not meeting regulatory thresholds?" — validates metric view + domain logic
-3. "Rank providers by their quality measure performance rate" — validates window function generation
+1. **"What are our Medicaid enrollment numbers by county?"** — exercises the basic star-schema join
+2. **"Which measures are at risk of not meeting regulatory thresholds?"** — exercises `dim_measure.regulatory_threshold` + `reporting_direction` for direction-aware comparison
+3. **"Rank providers by their quality measure performance rate"** — exercises window function generation (taught via benchmarks)
+
+For each, click "Show generated SQL" and notice that:
+- Question (2) wraps measures in `MEASURE(...)` — the metric view in action
+- Question (3) emits a `RANK() OVER(PARTITION BY ...)` even though the metric view itself doesn't define windows — Genie learned the pattern from the benchmark queries
+
+## Demo primer (≈3 minutes)
+
+| Beat | Time | What to do |
+|---|---|---|
+| Open | 30s | "This is the data warehouse a payer's HEDIS team would use. We've connected it to Genie so business users can ask questions in English." |
+| Basics | 60s | Ask "Medicaid enrollment by county" — show the result, then click into the SQL. Genie picked the right join. |
+| Domain intelligence | 60s | Ask "Which measures are at risk?" — point out the `dim_measure.regulatory_threshold` filter and the direction-aware comparison. |
+| Advanced analytics | 60s | Ask "Rank providers by performance rate" — `RANK() OVER` was generated despite the metric view having no windows. Benchmarks taught it. |
+| Governance | 30s | Show PHI/PII tags in Unity Catalog. Same query, different users — column masking and row filters apply automatically. |
+| Close | 30s | "Days, not months. The schema is standard. The Genie config is one notebook. The advanced patterns came from a few example queries — no fine-tuning." |
 
 ## Best Practices Implemented
 
-This Genie room follows several best practices that improve answer quality. Use these patterns when building your own spaces.
-
-### 1. Metric View as Semantic Layer
-
-The `mv_quality_performance` metric view defines measures (denominator, numerator, performance_rate, gap_to_threshold) in YAML. This means:
-
-- The HEDIS rate formula is defined **once** and consumed consistently everywhere
-- Business users can't accidentally compute rates wrong
-- Genie wraps measures in `MEASURE()` and groups by the dimensions it selects
-
-**Trade-off**: Metric views only support aggregate expressions — no window functions. We use a dual approach: metric view for standard analytics, base tables for window function queries.
-
-### 2. Benchmark Queries as Few-Shot Examples
-
-The 10 benchmark queries are the most powerful teaching tool. They give Genie example question-to-SQL pairs to learn from:
-
-- 5 standard aggregation patterns (enrollment counts, quality metrics, at-risk measures, YoY comparison, claims cost)
-- 5 window function patterns (RANK, LAG, NTILE, running SUM/AVG, PERCENT_RANK)
-
-When Genie sees a novel question, it references these benchmarks to select the right SQL pattern. Adding the 5 window function benchmarks immediately enabled Genie to generate window function SQL for questions it had never seen.
-
-### 3. Domain-Specific Instructions
-
-The text instructions encode healthcare semantics that Genie can't infer from table schemas alone:
-
-- What "at risk" means for Higher vs. Lower is Better measures
-- HEDIS and CMS Core Set jargon definitions
-- Aid category explanations (TANF, SSI, CHIP, Expansion Adult)
-- The correct performance rate formula with exclusion handling
-- When to use the metric view vs. base tables
-
-### 4. SQL Snippets for Reusable Logic
-
-Three types of SQL snippets provide Genie with reusable building blocks:
-
-- **Filters**: "active members only", "eligible for measure", "high priority measures", "star rating measures"
-- **Expressions**: measurement_quarter formatting, member age calculation, enrollment month labels
-- **Measures**: performance_rate, total_paid, PMPM cost formulas
-
-### 5. Governance Tags on Every Table
-
-All tables carry:
-
-- **Table-level tags**: domain, data_classification, contains_phi, contains_pii, hipaa
-- **Column-level tags**: phi=true, pii=true on sensitive fields (member_id, date_of_birth, zip_code, dx_codes, etc.)
-
-These tags drive Unity Catalog column masking and row-level security policies. When Genie generates SQL, it runs through the same governance layer — users without PHI access see masked values.
-
-### 6. Descriptive Column Comments
-
-Every column has a `COMMENT` in the DDL. Genie reads these comments to understand what columns mean and when to use them. Good column comments are often the difference between Genie selecting the right column and picking the wrong one.
-
-## Demo Primer
-
-Use this as a quick guide for walking someone through the Genie room. For a full scripted talk track, see the separate talk track documents (not in this repo).
-
-**Opening** (30s): "This is a Medicaid clinical quality data warehouse — the same star schema your HEDIS team would use. We've connected it to a Genie room so business users can ask questions in plain English."
-
-**Show the basics** (60s): Ask "What are our Medicaid enrollment numbers by county?" — show results, then show the generated SQL. Point out that Genie selected the right tables, joins, and aggregations.
-
-**Show domain intelligence** (60s): Ask "Which measures are at risk of not meeting regulatory thresholds?" — highlight that Genie understands Higher vs. Lower is Better measures and applies different threshold logic for each.
-
-**Show advanced analytics** (60s): Ask "Rank providers by their quality measure performance rate" — show the RANK() OVER window function in the generated SQL. Follow up with "Which providers are in the bottom quartile?" to show NTILE.
-
-**Show governance** (30s): Navigate to Unity Catalog, show the PHI/PII tags on dim_member. Explain that Genie's queries run through the same governance layer — column masking and row-level security apply automatically.
-
-**Close** (30s): "This took days to set up, not months. The data model is standard — your team already has one. The Genie space configuration is a Python script. And the advanced SQL patterns — window functions, metric views — are taught through benchmark examples, not model fine-tuning."
+- **Metric view as semantic layer.** `mv_quality_performance` defines all eight measures (denominator, numerator, performance_rate, gap_to_threshold, total_events, exclusion_count, distinct_members, distinct_providers) once. Every Genie answer uses the same math.
+- **Benchmark queries as few-shot examples.** Ten benchmarks — five standard aggregation patterns and five window-function patterns (RANK, LAG, NTILE, running SUM/AVG, PERCENT_RANK). Window-function generation is *taught*, not fine-tuned.
+- **Domain-specific instructions.** Healthcare jargon (HEDIS, CMS Core Set, TANF/SSI/CHIP, PMPM, MCO/FFS), the exact performance-rate formula, the `Higher is Better` vs `Lower is Better` rule, and a `metric view vs base tables` decision rule.
+- **SQL snippets for reusable logic.** Filters (`active members only`, `eligible for measure`, `high priority measures`, `star rating measures`), expressions (`measurement_quarter`, `member_age`), and measures (`performance_rate`, `total_paid`, `pmpm_cost`).
+- **Join specs.** Ten declarative joins with backtick-quoted aliases and `--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--` annotations so Genie generates correct cardinality.
+- **Governance tags on every table.** `phi=true`, `pii=true`, `hipaa=true`, `data_classification=...` on sensitive columns. Tags drive Unity Catalog [column masks](https://docs.databricks.com/aws/en/tables/column-mask) and [row filters](https://docs.databricks.com/aws/en/tables/row-and-column-filters).
+- **Row-filter cascade pattern.** The notebook ships an optional Step 10 that attaches a row filter to `dim_member` and demonstrates that it cascades automatically through views and the metric view into Genie.
+- **Descriptive column comments.** Every column has a `COMMENT` in the DDL — Genie reads them to disambiguate when picking columns.
 
 ## Quality Measures (18 Seeded)
 
@@ -210,7 +177,7 @@ Use this as a quick guide for walking someone through the Genie room. For a full
 |----------|----------|
 | Diabetes | HbA1c Poor Control, Eye Exam, Kidney Health Evaluation |
 | Cardiovascular | Blood Pressure Control |
-| Preventive | Breast Cancer Screening, Cervical Cancer Screening, Colorectal Cancer Screening, Adult Immunization |
+| Preventive | Breast / Cervical / Colorectal Cancer Screening, Adult Immunization |
 | Child Health | Well-Child Visits (3-21), Childhood Immunization Status |
 | Behavioral Health | MH Follow-Up (Inpatient), MH Follow-Up (ED), Antidepressant Medication Management, SUD Initiation & Engagement |
 | Respiratory | Asthma Medication Ratio |
@@ -219,7 +186,7 @@ Use this as a quick guide for walking someone through the Genie room. For a full
 
 ## Sample Questions
 
-### Standard Analytics
+**Standard analytics**
 1. What are our Medicaid enrollment numbers by county?
 2. Show me clinical quality metrics for the current quarter
 3. Which measures are at risk of not meeting regulatory thresholds?
@@ -229,7 +196,7 @@ Use this as a quick guide for walking someone through the Genie room. For a full
 7. Which providers have the highest quality measure compliance rates?
 8. Show enrollment trends by aid category over time
 
-### Window Function Analytics
+**Window-function analytics**
 9. Rank providers by their quality measure performance rate
 10. Show quarter-over-quarter performance trend for each measure
 11. Which providers are in the bottom quartile for quality performance?
@@ -240,13 +207,22 @@ Use this as a quick guide for walking someone through the Genie room. For a full
 
 | File | Purpose |
 |------|---------|
-| `notebooks/medicaid_clinical_setup.py` | Self-contained Databricks notebook (tables + data + metric view + tags) |
-| `create_tables.sql` | DDL with column descriptions and governance tags |
-| `insert_data.sql` | Generated INSERT statements (created by generate_data.py) |
+| `notebooks/medicaid_clinical_setup.py` | **One-notebook path**: schema + tables + data + metric view + tags + Genie space (idempotent) + optional row filter |
+| `create_tables.sql` | DDL with column comments and governance tags |
 | `apply_tags.sql` | PHI/PII/domain tag statements |
-| `create_metric_view.sql` | Metric view YAML definition with 8 measures and 20 dimensions |
-| `generate_data.py` | Synthetic data generator (deterministic, seed=42) |
+| `create_metric_view.sql` | Metric view YAML definition (8 measures, 20+ dimensions) |
+| `generate_data.py` | Synthetic data generator (deterministic, seed=42, stdlib-only) |
 | `execute_sql.py` | SQL execution utility via Databricks CLI |
-| `create_genie_space.py` | Creates the Genie space with sample questions and instructions |
-| `update_genie_space.py` | Adds join specs, SQL snippets, and benchmark queries |
-| `add_window_functions.py` | Adds 5 window function benchmarks and sample questions |
+| `create_genie_space.py` | CLI alternative — creates the Genie space |
+| `update_genie_space.py` | CLI alternative — adds joins, snippets, standard benchmarks |
+| `add_window_functions.py` | CLI alternative — adds 5 window-function benchmarks |
+| `insert_data.sql` | Generated INSERT statements (created by `generate_data.py`) |
+
+## Useful links
+
+- [Genie space documentation](https://docs.databricks.com/aws/en/genie/)
+- [Genie REST API reference](https://docs.databricks.com/api/workspace/genie)
+- [Metric views](https://docs.databricks.com/aws/en/metric-views/)
+- [Unity Catalog row filters and column masks](https://docs.databricks.com/aws/en/tables/row-and-column-filters)
+- [Databricks Free Edition signup](https://www.databricks.com/learn/free-edition)
+- [Databricks CLI install](https://docs.databricks.com/aws/en/dev-tools/cli/install)

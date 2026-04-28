@@ -56,7 +56,7 @@ join_specs = [
         "id": "e0000000000000000000000000000001",
         "left": {"identifier": f"{FQN}.dim_member", "alias": "dim_member"},
         "right": {"identifier": f"{FQN}.dim_county", "alias": "dim_county"},
-        "sql": ["dim_member.county_fips = dim_county.county_fips"],
+        "sql": ["`dim_member`.county_fips = `dim_county`.county_fips", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
         "comment": ["Join member to county for geographic analysis of member residence"],
         "instruction": ["Use when you need member county name, state, region, or urban/rural classification"]
     },
@@ -64,7 +64,7 @@ join_specs = [
         "id": "e0000000000000000000000000000002",
         "left": {"identifier": f"{FQN}.dim_provider", "alias": "dim_provider"},
         "right": {"identifier": f"{FQN}.dim_county", "alias": "dim_county"},
-        "sql": ["dim_provider.county_fips = dim_county.county_fips"],
+        "sql": ["`dim_provider`.county_fips = `dim_county`.county_fips", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
         "comment": ["Join provider to county for provider practice location analysis"],
         "instruction": ["Use when you need provider location details"]
     },
@@ -72,7 +72,7 @@ join_specs = [
         "id": "e0000000000000000000000000000003",
         "left": {"identifier": f"{FQN}.fact_claims", "alias": "fact_claims"},
         "right": {"identifier": f"{FQN}.dim_member", "alias": "dim_member"},
-        "sql": ["fact_claims.member_id = dim_member.member_id"],
+        "sql": ["`fact_claims`.member_id = `dim_member`.member_id", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
         "comment": ["Join claims to member demographics"],
         "instruction": ["Use when analyzing claims by member demographics like aid category, gender, or chronic conditions"]
     },
@@ -80,7 +80,7 @@ join_specs = [
         "id": "e0000000000000000000000000000004",
         "left": {"identifier": f"{FQN}.fact_claims", "alias": "fact_claims"},
         "right": {"identifier": f"{FQN}.dim_provider", "alias": "dim_provider"},
-        "sql": ["fact_claims.provider_npi = dim_provider.provider_npi"],
+        "sql": ["`fact_claims`.provider_npi = `dim_provider`.provider_npi", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
         "comment": ["Join claims to provider for provider-level claims analysis"],
         "instruction": ["Use when analyzing claims by provider type or specific providers"]
     },
@@ -88,7 +88,7 @@ join_specs = [
         "id": "e0000000000000000000000000000005",
         "left": {"identifier": f"{FQN}.fact_enrollment", "alias": "fact_enrollment"},
         "right": {"identifier": f"{FQN}.dim_county", "alias": "dim_county"},
-        "sql": ["fact_enrollment.county_fips = dim_county.county_fips"],
+        "sql": ["`fact_enrollment`.county_fips = `dim_county`.county_fips", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
         "comment": ["Join enrollment to county for enrollment by geography"],
         "instruction": ["Use when analyzing enrollment numbers by county, state, or region"]
     },
@@ -96,7 +96,7 @@ join_specs = [
         "id": "e0000000000000000000000000000006",
         "left": {"identifier": f"{FQN}.fact_enrollment", "alias": "fact_enrollment"},
         "right": {"identifier": f"{FQN}.dim_member", "alias": "dim_member"},
-        "sql": ["fact_enrollment.member_id = dim_member.member_id"],
+        "sql": ["`fact_enrollment`.member_id = `dim_member`.member_id", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
         "comment": ["Join enrollment to member demographics"],
         "instruction": ["Use when analyzing enrollment trends by member demographics"]
     },
@@ -104,7 +104,7 @@ join_specs = [
         "id": "e0000000000000000000000000000007",
         "left": {"identifier": f"{FQN}.fact_quality_events", "alias": "fact_quality_events"},
         "right": {"identifier": f"{FQN}.dim_county", "alias": "dim_county"},
-        "sql": ["fact_quality_events.county_fips = dim_county.county_fips"],
+        "sql": ["`fact_quality_events`.county_fips = `dim_county`.county_fips", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
         "comment": ["Join quality events to county for geographic quality analysis"],
         "instruction": ["Use when analyzing quality measure performance by county or region"]
     },
@@ -112,7 +112,7 @@ join_specs = [
         "id": "e0000000000000000000000000000008",
         "left": {"identifier": f"{FQN}.fact_quality_events", "alias": "fact_quality_events"},
         "right": {"identifier": f"{FQN}.dim_measure", "alias": "dim_measure"},
-        "sql": ["fact_quality_events.measure_id = dim_measure.measure_id"],
+        "sql": ["`fact_quality_events`.measure_id = `dim_measure`.measure_id", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
         "comment": ["Join quality events to measure definitions for measure metadata"],
         "instruction": ["Use when you need measure name, category, thresholds, or reporting direction alongside quality event data"]
     },
@@ -120,7 +120,7 @@ join_specs = [
         "id": "e0000000000000000000000000000009",
         "left": {"identifier": f"{FQN}.fact_quality_events", "alias": "fact_quality_events"},
         "right": {"identifier": f"{FQN}.dim_member", "alias": "dim_member"},
-        "sql": ["fact_quality_events.member_id = dim_member.member_id"],
+        "sql": ["`fact_quality_events`.member_id = `dim_member`.member_id", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
         "comment": ["Join quality events to member demographics"],
         "instruction": ["Use when analyzing quality measures by member demographics, aid category, or chronic conditions"]
     },
@@ -128,7 +128,7 @@ join_specs = [
         "id": "e000000000000000000000000000000a",
         "left": {"identifier": f"{FQN}.fact_quality_events", "alias": "fact_quality_events"},
         "right": {"identifier": f"{FQN}.dim_provider", "alias": "dim_provider"},
-        "sql": ["fact_quality_events.provider_npi = dim_provider.provider_npi"],
+        "sql": ["`fact_quality_events`.provider_npi = `dim_provider`.provider_npi", "--rt=FROM_RELATIONSHIP_TYPE_MANY_TO_ONE--"],
         "comment": ["Join quality events to provider for provider-level quality analysis"],
         "instruction": ["Use when analyzing quality measure compliance by provider type or specific providers"]
     },
@@ -296,10 +296,7 @@ ss["instructions"] = {
     "sql_snippets": sql_snippets,
 }
 
-# Try join_specs and benchmarks in instructions
-# Note: join_specs.sql field has a proto parsing issue on this workspace version.
-# Joins are documented in text_instructions instead and can be added via the Genie UI.
-# ss["instructions"]["join_specs"] = join_specs
+ss["instructions"]["join_specs"] = join_specs
 
 # Add benchmarks at top level
 ss["benchmarks"] = benchmarks
